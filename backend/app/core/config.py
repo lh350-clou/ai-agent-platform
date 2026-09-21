@@ -122,6 +122,24 @@ class Settings(BaseSettings):
     # 没有超时的话整个 Agent 请求会一直挂在那里，直到 HTTP 层超时。
     MCP_TOOL_TIMEOUT_SECONDS: float = 15.0
 
+    # ---- 跨域（CORS）----
+    # 允许访问后端的前端地址，逗号分隔。
+    #
+    # 用逗号分隔的字符串而不是 JSON 数组：写环境变量时
+    # CORS_ALLOW_ORIGINS=http://a,http://b 比
+    # CORS_ALLOW_ORIGINS=["http://a","http://b"] 顺手得多，
+    # 而后者只要少一个引号，应用启动就会因为解析失败而挂掉。
+    #
+    # 默认值只放开发用的两个地址。【绝不使用 "*"】：
+    # 通配符意味着任何网站都能带着用户的浏览器直接调这些接口，
+    # 而这些接口既没有鉴权、又能删数据。
+    CORS_ALLOW_ORIGINS: str = "http://127.0.0.1:5173,http://localhost:5173"
+
+    @property
+    def cors_allow_origins(self) -> list[str]:
+        """把逗号分隔的配置拆成 CORS 中间件要的列表，顺带去掉空项。"""
+        return [origin.strip() for origin in self.CORS_ALLOW_ORIGINS.split(",") if origin.strip()]
+
     @property
     def database_url(self) -> str:
         """拼接 SQLAlchemy 异步连接串。

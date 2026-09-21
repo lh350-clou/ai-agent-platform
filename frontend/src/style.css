@@ -1,0 +1,57 @@
+/* 全局样式与设计变量。
+ *
+ * 没有引入 UI 组件库：这一阶段只是骨架，配色、间距、圆角这几个决定
+ * 先用 CSS 变量集中定义，等界面真的长起来之后再考虑要不要上组件库 ——
+ * 那时候换的成本，也比现在就绑死一套要低。
+ */
+
+:root {
+  /* 强调色只用一个（靛蓝），其余全是中性灰。
+     单色强调是这类工具型界面最稳的做法：不容易配出花，也不会喧宾夺主。 */
+  --color-accent: #4f46e5;
+  --color-accent-strong: #4338ca;
+  --color-accent-soft: rgba(79, 70, 229, 0.14);
+
+  --color-bg: #f9fafb;
+  --color-surface-hover: #f3f4f6;
+  --color-surface-active: #eef2ff;
+
+  --color-border: #e5e7eb;
+
+  --color-text: #1f2937;
+  --color-text-muted: #6b7280;
+  --color-text-faint: #9ca3af;
+
+  --sidebar-width: 264px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* 字体族里带上 "Microsoft YaHei"：本项目主要在 Windows 上开发，
+     默认字体渲染中文偏细，加上它中文字形更清晰。 */
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-text);
+  background-color: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 窄窗口下把侧栏收窄，给右侧对话区留出空间。
+   仅靠 min-width: 0 也能保证不挤坏，但侧栏占着 264px 时
+   对话区在小窗口里会很憋屈，收窄一点体验更好。 */
+@media (max-width: 900px) {
+  :root {
+    --sidebar-width: 208px;
+  }
+}

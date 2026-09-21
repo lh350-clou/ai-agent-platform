@@ -21,7 +21,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openai.types.chat import ChatCompletionMessageParam
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -30,6 +29,7 @@ from app.models.knowledge_base import KnowledgeBase
 from app.models.message import Message
 from app.schemas.qa import AskRequest, AskResponse
 from app.services import llm, vector_store
+from app.services.conversation import history_to_messages, load_recent_messages
 from app.services.embedding import embed_text
 
 logger = logging.getLogger(__name__)
@@ -40,24 +40,10 @@ router = APIRouter(prefix="/api/knowledge-bases", tags=["知识库问答"])
 # 标题只用于列表展示，不需要装下完整问题。
 TITLE_MAX_LENGTH: int = 50
 
-# 每次请求最多带多少条历史消息给模型。
-#
-# 为什么必须设上限：历史会随对话无限增长，而每次请求都要把它们
-# 完整发给 DeepSeek —— token 消耗和费用随之线性上涨，迟早撞上模型的
-# 上下文窗口，而且很久之前的问答对当前问题基本没有帮助。
-#
-# 第一版用最简单的策略：只取最近 N 条，不做摘要、不做相关性筛选。
-# 够用，也足够诚实 —— 摘要记忆是另一个量级的工作，不该顺手塞进来。
-MAX_HISTORY_MESSAGES: int = 10
-
-# 允许进入提示词的历史消息角色。
-#
-# 只放行 user 和 assistant。数据库里的 messages.role 是一个自由字符串
-# （当初为了「加新角色不用改表结构」才没用 enum），万一有代码写入了
-# role="system" 的记录，把它原样拼进 messages 就等于让【库里的数据】
-# 坐上了系统指令的位置 —— 那正是提示词注入最想要的入口。
-# 在这里白名单过滤，比指望所有写入方都规矩更可靠。
-_ALLOWED_HISTORY_ROLES: frozenset[str] = frozenset({"user", "assistant"})
+# 说明：「取最近多少条历史消息」「哪些角色能进提示词」这两条规则
+# 已经挪到 services/conversation.py —— Agent 那边也要用同一套，
+# 留两份迟早会改歪一处。本模块通过 load_recent_messages /
+# history_to_messages 使用它们，对外行为完全不变。
 
 # 检索不到任何内容时，放进 context 的占位文字。
 # 它必须明确表达「什么都没有」，而不是留一段空白 ——
@@ -145,38 +131,9 @@ def build_rag_messages(
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_content}
     ]
-
-    for row in history:
-        # 白名单过滤：任何非 user / assistant 的角色都不进提示词。
-        # 这是防止「库里的数据冒充系统指令」的最后一道闸门。
-        if row.role not in _ALLOWED_HISTORY_ROLES:
-            logger.warning(
-                "历史消息角色不在白名单，已跳过：message_id=%s role=%r",
-                row.id, row.role,
-            )
-            continue
-        messages.append({"role": row.role, "content": row.content})
-
+    # 角色白名单过滤在 history_to_messages 里（防止「库里的数据冒充系统指令」）。
+    messages.extend(history_to_messages(history))
     return messages
-
-
-async def _load_recent_history(db: AsyncSession, conversation_id: UUID) -> list[Message]:
-    """读取会话最近的消息，按时间正序返回。
-
-    为什么要「先倒序取 N 条、再翻转」而不是直接 `ORDER BY created_at ASC LIMIT N`：
-    后者取到的是【最早】的 N 条，恰恰是对话开头那几句。
-    而我们要的是【最近】的 N 条。这个错误很隐蔽 ——
-    短对话里两者结果一样，只有消息超过上限之后才会显形，
-    表现为「模型突然忘了刚才说过什么」。
-    """
-    rows = await db.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.desc())
-        .limit(MAX_HISTORY_MESSAGES)
-    )
-    # 倒序取出来的是「从新到旧」，翻转成「从旧到新」才是给模型的时间顺序
-    return list(reversed(rows.scalars().all()))
 
 
 @router.post(
@@ -255,7 +212,7 @@ async def ask_knowledge_base(
     await db.commit()
 
     # ---- 4. 读取历史（含刚保存的这条，它是历史的最后一条）----
-    history = await _load_recent_history(db, conversation.id)
+    history = await load_recent_messages(db, conversation.id)
 
     # ---- 5. 问题 → 向量 ----
     try:

@@ -22,7 +22,9 @@ from uuid import UUID
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.models.message import Message
 from app.services import llm, mcp_client, vector_store
+from app.services.conversation import history_to_messages
 from app.services.embedding import embed_text
 
 logger = logging.getLogger(__name__)
@@ -366,17 +368,17 @@ def _assistant_message_payload(message: Any) -> dict[str, Any]:
 async def run_agent(
     question: str,
     knowledge_base_id: UUID,
-    conversation_id: UUID | None = None,
+    history: list[Message] | None = None,
 ) -> AgentResult:
-    """让模型自主决定是否检索知识库，最终给出回答。
+    """让模型自主决定是否调用工具，最终给出回答。
 
     参数：
-        question:          用户问题。
+        question:          本轮用户问题。
         knowledge_base_id: 允许检索的知识库。由调用方从请求路径取得，
                            模型无法修改（见 _execute_tool 的说明）。
-        conversation_id:   预留给后续的多轮 Agent，当前版本未使用 ——
-                           保留形参是为了让接口契约先定下来，
-                           加历史时不用改调用方。
+        history:           之前的对话消息，【不含本轮问题】。
+                           由调用方从数据库读出后传进来 ——
+                           service 层不碰数据库，保持「给什么就用什么」。
 
     返回：
         AgentResult：最终回答 + 本次实际执行过的工具调用列表。
@@ -384,10 +386,23 @@ async def run_agent(
     异常：
         RuntimeError：调用 DeepSeek 失败，或模型在限定轮数内始终没有给出回答。
     """
+    # 消息结构：
+    #     system  —— Agent 规则
+    #     历史     —— 之前的 user / assistant 消息，原样保留角色
+    #     user    —— 本轮问题
+    #
+    # 历史【不拼进 system】，而是作为独立消息排在后面。理由和 RAG 问答那边
+    # 一致：拼接会抹掉角色边界，模型看到的将是一整段混杂着「用户说过的」
+    # 和「助手说过的」的文字，无法区分谁说的，也就更容易把历史里的某句话
+    # 当成新指令执行 —— 那正是提示词注入想要的。
+    #
+    # 角色白名单过滤在 history_to_messages 里完成（只放行 user / assistant），
+    # 防止库里万一存了 role="system" 的记录冒充系统指令。
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-        {"role": "user", "content": question},
     ]
+    messages.extend(history_to_messages(history or []))
+    messages.append({"role": "user", "content": question})
 
     # 一次请求只开一个 MCP 会话，用完由 ExitStack 统一关闭。
     # 会话要在【循环之外】打开：循环里每一轮都可能调用 MCP 工具，

@@ -8,6 +8,8 @@ service 定义的是「程序内部怎么表达结果」，schema 定义的是�
 
 from typing import Any
 
+from uuid import UUID
+
 from pydantic import BaseModel, Field, field_validator
 
 # 问题文本的长度上限，与其它几个接口保持一致。
@@ -30,6 +32,14 @@ class AgentRequest(BaseModel):
         """先去首尾空白再做长度校验，理由同其它接口：
         mode="before" 才能让 "   " 在清洗后正确地判为空、返回 422。"""
         return value.strip() if isinstance(value, str) else value
+
+    # 会话 ID。不传表示「开一个新会话」，服务端创建后随响应返回；
+    # 传上一次的返回值则延续同一个会话，模型能看到之前的问答。
+    conversation_id: UUID | None = Field(
+        default=None,
+        description="会话 ID；不传或传 null 表示新建会话",
+        examples=[None],
+    )
 
 
 class AgentToolCall(BaseModel):
@@ -64,6 +74,9 @@ class AgentToolCall(BaseModel):
 class AgentResponse(BaseModel):
     """POST /api/knowledge-bases/{id}/agent 的响应体。"""
 
+    # 本次问答所属的会话 ID。新建会话时这里是新生成的 ID，
+    # 调用方把它存下来，下一轮原样传回来就能接上上下文。
+    conversation_id: UUID = Field(description="会话 ID，下一轮请求带上它即可延续对话")
     answer: str = Field(description="Agent 的最终回答")
     tool_calls: list[AgentToolCall] = Field(
         default_factory=list,

@@ -23,11 +23,13 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.agent import router as agent_router
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
+from app.api.knowledge_bases import router as knowledge_bases_router
 from app.api.qa import router as qa_router
 from app.api.search import router as search_router
 from app.core.config import settings
@@ -83,6 +85,22 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # 跨域配置。前端跑在 5173 端口，和后端不是同一个源，
+    # 浏览器默认会拦掉这类请求，必须在这里显式放行。
+    #
+    # 允许的来源来自配置（默认只有开发用的两个本地地址），
+    # 不使用 "*"：这些接口没有鉴权，通配符等于让任意网站都能
+    # 借用户的浏览器调它们，其中包括删知识库这种破坏性操作。
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allow_origins,
+        # 允许带 Cookie 之类的凭据。只有在 allow_origins 不是 "*" 时
+        # 才能开启这一项（浏览器规范禁止二者同时使用）。
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # 注册各模块的路由。后续新增模块时，在这里追加 include_router 即可，
     # 不需要改动已有代码。
     application.include_router(health_router)
@@ -91,6 +109,7 @@ def create_app() -> FastAPI:
     application.include_router(search_router)
     application.include_router(qa_router)
     application.include_router(agent_router)
+    application.include_router(knowledge_bases_router)
 
     return application
 

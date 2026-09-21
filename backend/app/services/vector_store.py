@@ -98,6 +98,19 @@ def _delete_by_document_sync(document_id: str) -> int:
     return int(result.get("delete_count", 0))
 
 
+def _delete_by_knowledge_base_sync(knowledge_base_id: str) -> int:
+    client = milvus.get_milvus_client()
+
+    result = client.delete(
+        collection_name=milvus.COLLECTION_NAME,
+        filter=f'{milvus.KNOWLEDGE_BASE_ID_FIELD} == "{knowledge_base_id}"',
+    )
+
+    client.flush(milvus.COLLECTION_NAME)
+
+    return int(result.get("delete_count", 0))
+
+
 def _search_sync(knowledge_base_id: str, query_vector: list[float], top_k: int) -> list[list[dict]]:
     client = milvus.get_milvus_client()
 
@@ -228,6 +241,42 @@ async def delete_by_document_id(document_id: str) -> int:
             milvus.COLLECTION_NAME, document_id,
         )
         raise RuntimeError(f"删除 Milvus 数据失败（document_id={document_id}）") from exc
+    except OSError as exc:
+        logger.exception("无法连接 Milvus：%s", milvus.MILVUS_URI)
+        raise RuntimeError(
+            f"无法连接 Milvus（{milvus.MILVUS_URI}），请确认容器是否在运行"
+        ) from exc
+
+
+async def delete_by_knowledge_base_id(knowledge_base_id: str) -> int:
+    """删除整个知识库在 Milvus 中的全部向量（该库下所有文档的所有切片）。
+
+    用在「删除知识库」上。一次调用就能清干净，不需要先查出库下有哪些文档
+    再逐个删 —— 因为 collection 里每一行都带着 knowledge_base_id，
+    按它过滤是最直接的。
+
+    参数：
+        knowledge_base_id: 要清空的知识库。
+
+    返回：
+        实际删除的条数。库里本来就没有向量时返回 0（不是错误）。
+
+    异常：
+        ValueError：   knowledge_base_id 为空或含双引号。
+        RuntimeError： Milvus 不可用或删除失败。
+    """
+    _validate_filter_id(knowledge_base_id, "knowledge_base_id")
+
+    try:
+        return await asyncio.to_thread(_delete_by_knowledge_base_sync, knowledge_base_id)
+    except MilvusException as exc:
+        logger.exception(
+            "删除 Milvus 数据失败：collection=%s knowledge_base_id=%s",
+            milvus.COLLECTION_NAME, knowledge_base_id,
+        )
+        raise RuntimeError(
+            f"删除 Milvus 数据失败（knowledge_base_id={knowledge_base_id}）"
+        ) from exc
     except OSError as exc:
         logger.exception("无法连接 Milvus：%s", milvus.MILVUS_URI)
         raise RuntimeError(
