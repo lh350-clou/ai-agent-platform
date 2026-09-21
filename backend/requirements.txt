@@ -1,0 +1,30 @@
+# ============================================================
+# 后端依赖 —— AI 智能知识库 Agent 平台
+# 安装：cd backend && pip install -r requirements.txt
+# 当前阶段包含骨架 + PostgreSQL 接入所需依赖，向量库 / LLM SDK 待对应功能开发时再加入。
+# 说明：Alembic（数据库迁移）属于下一阶段，本阶段不安装。
+# ============================================================
+
+# Web 框架：提供路由、依赖注入与自动生成 OpenAPI 文档
+fastapi>=0.141.1
+
+# ASGI 服务器：实际跑起 FastAPI 应用的进程
+# [standard] 附带 httptools / uvloop / watchfiles，--reload 热重载依赖它
+uvicorn[standard]>=0.30.0
+
+# 配置管理：从 .env 与环境变量读取配置并做类型校验
+# 选它而不是自己读 os.environ，是为了让配置有类型、有默认值、缺失时能给出明确报错
+pydantic-settings>=2.14.2
+
+# ---------- 数据库 ----------
+
+# ORM：用 SQLAlchemy 2.x 的类型化声明式写法（Mapped / mapped_column），
+# 让「Python 类型提示」和「数据库列定义」写在一起。
+# [asyncio] 这个 extra 会自动装上 greenlet —— SQLAlchemy 异步支持的底层依赖，
+# 单独装 sqlalchemy 而漏掉它，运行时会报 MissingGreenlet。
+sqlalchemy[asyncio]>=2.0.54
+
+# PostgreSQL 异步驱动：SQLAlchemy 通过 postgresql+asyncpg 这个方言调用它。
+# 选 asyncpg 而不是同步的 psycopg2，是因为 FastAPI 跑在事件循环上，
+# 同步驱动执行查询时会阻塞整个事件循环，导致其他请求排队等待。
+asyncpg>=0.31.0
