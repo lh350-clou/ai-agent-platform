@@ -11,12 +11,19 @@
 
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    # 只在类型检查（mypy / IDE）时导入，运行时靠 SQLAlchemy 按类名去注册表里找。
+    # 理由同 conversation.py：真写成 import 会让两个模块互相导入，
+    # Python 加载到一半就会因为「对方还没定义完」而报 ImportError。
+    from app.models.document import Document
 
 
 class KnowledgeBase(Base):
@@ -52,6 +59,23 @@ class KnowledgeBase(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
         server_default=func.now(),
+    )
+
+    # 一对多：一个知识库有多份文档。
+    #
+    # 上面那段模块 docstring 提到「文档表会在接入 Milvus 的 RAG 阶段再加」，
+    # 现在这个阶段到了，所以把关系补在这里。
+    #
+    # 两个 cascade 参数的分工同 Conversation.messages：
+    #   - cascade="all, delete-orphan" 是 ORM 层规则：删知识库时连带删它的文档；
+    #     文档一旦从 knowledge_base.documents 里被移出去，就当孤儿删掉。
+    #   - passive_deletes=True 让 SQLAlchemy 不要先把文档一条条加载进内存再逐条 DELETE，
+    #     而是交给数据库 —— 外键上已经声明了 ON DELETE CASCADE，
+    #     一条语句就能删干净，文档多时快得多。
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="knowledge_base",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:

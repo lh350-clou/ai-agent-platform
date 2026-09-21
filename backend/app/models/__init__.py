@@ -9,7 +9,8 @@
 
 from app.models.base import Base
 from app.models.conversation import Conversation
+from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
 from app.models.message import Message
 
-__all__ = ["Base", "Conversation", "KnowledgeBase", "Message"]
+__all__ = ["Base", "Conversation", "Document", "KnowledgeBase", "Message"]

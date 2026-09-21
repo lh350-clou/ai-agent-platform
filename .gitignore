@@ -51,6 +51,12 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# ---------- 用户上传的文件 ----------
+# 文档上传接口把原始文件落在仓库根目录的 storage/documents/ 下。
+# 这些是运行时产生的用户数据，不是代码：既不该进版本库（会让仓库迅速膨胀），
+# 也不该被 git status 一直提示为未跟踪文件。
+storage/
+
 # ---------- 临时文件与缓存 ----------
 *.tmp
 *.temp

@@ -8,6 +8,12 @@
 # Web 框架：提供路由、依赖注入与自动生成 OpenAPI 文档
 fastapi>=0.141.1
 
+# multipart/form-data 解析器：FastAPI 处理文件上传（UploadFile / Form）的必需依赖。
+# 它不在 FastAPI 的默认依赖里，漏装时不是「上传功能不可用」这么轻 ——
+# FastAPI 在「定义路由」的时候就会检查它，缺了会直接抛 RuntimeError，
+# 导致整个应用导入失败。所以只要有上传接口，这个包就必须在。
+python-multipart>=0.0.32
+
 # ASGI 服务器：实际跑起 FastAPI 应用的进程
 # [standard] 附带 httptools / uvloop / watchfiles，--reload 热重载依赖它
 uvicorn[standard]>=0.30.0
@@ -46,3 +52,13 @@ alembic>=1.13
 # FastAPI 跑在事件循环上，一次模型调用要等好几秒，同步 SDK 会把这期间
 # 整个事件循环堵死，导致其他请求只能排队；async 版本则是把等待时间让出去。
 openai>=3.11.0
+
+# ---------- 向量数据库 ----------
+
+# Milvus 官方 Python 客户端。选它而不是自己拼 gRPC / HTTP 请求：
+# 建集合、定义索引、插入、向量检索这些操作，参数都要按 Milvus 的 proto 结构组织，
+# 官方 SDK 已经把它们封装成 Python 方法，并代管连接、重试和类型转换。
+#
+# 版本必须和服务端对齐主版本：本地容器跑的是 milvusdb/milvus:v3.0.1，
+# 所以这里用 3.0.x 的客户端。用 2.x 客户端去连 3.0 服务端会因为接口不兼容而连不上。
+pymilvus>=3.0.2

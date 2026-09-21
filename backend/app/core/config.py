@@ -75,6 +75,38 @@ class Settings(BaseSettings):
     # deepseek-chat 是通用对话模型（deepseek-reasoner 是推理模型，本项目暂不用）。
     DEEPSEEK_MODEL: str = "deepseek-chat"
 
+    # ---- 硅基流动 Embedding ----
+    # 为什么向量化不用 DeepSeek：DeepSeek 官方 API 只有 chat / reasoner 这类生成模型，
+    # 没有 embedding 接口（调用 /embeddings 会返回 404）。
+    # 所以 RAG 的两半分别由两家承担：「把文本转向量」用硅基流动，「根据检索结果生成答案」用 DeepSeek。
+    #
+    # 硅基流动同样是 OpenAI 兼容接口，所以下面两个配置项和 openai SDK 的参数一一对应，
+    # 调用侧可以复用同一个 SDK，只是把 base_url 换掉。
+    SILICONFLOW_API_KEY: SecretStr = SecretStr("")
+    # 这个地址带 /v1 后缀，和上面 DEEPSEEK_BASE_URL 的写法不一样 ——
+    # 各家的路径约定不同，不是笔误。SDK 会在这后面拼 /embeddings。
+    SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
+
+    # 向量模型名。做成配置而不写死在调用处，将来换模型只改 .env，不用动代码。
+    SILICONFLOW_EMBEDDING_MODEL: str = "BAAI/bge-m3"
+
+    # 向量维度。显式配置出来不是为了方便改，恰恰相反 —— 是要让「改错」这件事尽早暴露：
+    # Milvus collection 的维度在创建时就固定了，建完改不了，只能重建集合并把全部文档
+    # 重新向量化一遍。如果换模型后维度对不上却没人察觉，检索会照常返回结果，
+    # 只是那些相似度全是无意义的 —— 这种错误极难排查。
+    # 有了这个配置项，就能在写入前拿它和 collection 的实际维度比一次，不一致就直接报错。
+    # bge-m3 的输出维度是 1024。
+    EMBEDDING_DIM: int = 1024
+
+    # ---- 文件上传限制 ----
+    # 单个上传文件的大小上限，单位字节，默认 10 MiB。
+    #
+    # 放在配置里而不是写成接口内的字面量，有两个原因：
+    # 一是部署环境不同上限也不同（本地开发可以松，公网部署必须紧），
+    # 二是测试需要把它临时调小，才能在不构造 10 MiB 真实数据的前提下
+    # 覆盖「恰好等于上限」「超过 1 字节」这些边界情况。
+    MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024
+
     @property
     def database_url(self) -> str:
         """拼接 SQLAlchemy 异步连接串。
