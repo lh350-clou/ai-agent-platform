@@ -9,6 +9,8 @@
     http://127.0.0.1:8000/api/chat                对话接口（POST）
     http://127.0.0.1:8000/api/documents/upload    文档上传（POST, multipart）
     http://127.0.0.1:8000/api/documents/{id}      文档查询（GET）/ 删除（DELETE）
+    http://127.0.0.1:8000/api/knowledge-bases/{id}/search   知识库检索（POST）
+    http://127.0.0.1:8000/api/knowledge-bases/{id}/ask      RAG 问答（POST）
     http://127.0.0.1:8000/docs                    自动生成的接口文档
 
 数据库配置从仓库根目录的 .env 读取（见 app/core/config.py），
@@ -24,6 +26,8 @@ from fastapi import FastAPI
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
+from app.api.qa import router as qa_router
+from app.api.search import router as search_router
 from app.core.config import settings
 from app.core.database import check_connection, engine
 
@@ -82,6 +86,8 @@ def create_app() -> FastAPI:
     application.include_router(health_router)
     application.include_router(chat_router)
     application.include_router(documents_router)
+    application.include_router(search_router)
+    application.include_router(qa_router)
 
     return application
 

@@ -9,16 +9,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
 if TYPE_CHECKING:
-    # 只在类型检查（mypy / IDE）时导入 Message，运行时靠 SQLAlchemy 按类名去注册表里找。
-    # 如果这里写成真的 import，conversation.py 和 message.py 会互相导入，
+    # 只在类型检查（mypy / IDE）时导入，运行时靠 SQLAlchemy 按类名去注册表里找。
+    # 如果这里写成真的 import，模块之间会互相导入，
     # Python 加载到一半就会因为「对方还没定义完」而报 ImportError。
+    from app.models.knowledge_base import KnowledgeBase
     from app.models.message import Message
 
 
@@ -42,6 +43,29 @@ class Conversation(Base):
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
+    )
+
+    # 所属知识库。
+    #
+    # 这一列是后加的：最初设计对话表时，对话只是一个独立的会话容器，
+    # 和知识库没有关系。接入 RAG 问答之后，每个会话都是「针对某个知识库的
+    # 连续提问」，于是必须回答一个问题 —— 这个 conversation_id 属于哪个库？
+    #
+    # 为什么不能用别的方式判断：messages 只关联 conversations，
+    # 没有任何一列指向知识库或文档，也就是说从会话出发【根本走不到知识库】。
+    # 靠内存变量或缓存在进程里记住归属是不行的：服务一重启就丢，
+    # 而且多实例部署时每个实例各记各的，用户换个实例就会被判成「不属于这个库」。
+    # 归属是持久化的事实，只能落在数据库里。
+    #
+    # ondelete="CASCADE"：删掉知识库时，它下面的会话一并删除 ——
+    # 知识库没了，针对它的对话也就失去了意义，留下只会是孤儿数据。
+    # index=True 的理由同其它外键列：PostgreSQL 不会为外键自动建索引，
+    # 而「按知识库列出会话」是需要索引的常用查询。
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
 
     # 标题允许为空。新建对话时用户往往还没想好名字，
@@ -90,6 +114,11 @@ class Conversation(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    # 多对一的反向关系：每个会话属于一个知识库。
+    # 这里不写 cascade —— 删除的传播方向是「从父到子」，
+    # 删掉一个会话不应该影响它所属的知识库。
+    knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="conversations")
 
     def __repr__(self) -> str:
         # 只列关键字段，方便在调试器里一眼认出对象；不要把 messages 也打出来，

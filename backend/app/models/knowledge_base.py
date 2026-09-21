@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     # 只在类型检查（mypy / IDE）时导入，运行时靠 SQLAlchemy 按类名去注册表里找。
     # 理由同 conversation.py：真写成 import 会让两个模块互相导入，
     # Python 加载到一半就会因为「对方还没定义完」而报 ImportError。
+    from app.models.conversation import Conversation
     from app.models.document import Document
 
 
@@ -73,6 +74,15 @@ class KnowledgeBase(Base):
     #     而是交给数据库 —— 外键上已经声明了 ON DELETE CASCADE，
     #     一条语句就能删干净，文档多时快得多。
     documents: Mapped[list["Document"]] = relationship(
+        back_populates="knowledge_base",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # 一对多：一个知识库下有多轮会话。
+    # cascade 的写法同 documents —— 删库时连同它的会话一起删掉。
+    # 会话本身不存内容，内容在 messages 表里，由 Conversation.messages 继续往下级联。
+    conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="knowledge_base",
         cascade="all, delete-orphan",
         passive_deletes=True,
