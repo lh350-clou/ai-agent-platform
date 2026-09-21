@@ -1,0 +1,74 @@
+# ============================================================
+# .gitignore — AI 智能知识库 Agent 平台
+# 适用于 Python + FastAPI + Vue 3 + Node.js
+# ============================================================
+
+# ---------- 环境变量与密钥（重要）----------
+# 真实密钥绝不提交，只保留 .env.example 作为模板
+.env
+.env.*
+!.env.example
+
+# ---------- Python 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- Python 缓存与构建产物 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+*.egg-info/
+.eggs/
+
+# ---------- Python 工具缓存 ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---------- 前端依赖 ----------
+node_modules/
+.npm/
+.pnpm-store/
+
+# ---------- 前端构建产物 ----------
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# ---------- 日志 ----------
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 临时文件与缓存 ----------
+*.tmp
+*.temp
+*.bak
+.cache/
+tmp/
+temp/
+
+# ---------- 操作系统文件 ----------
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------- 编辑器 / IDE ----------
+# PyCharm
+.idea/
+# Claude Code 本地配置（含本地设置，不提交）
+.claude/
