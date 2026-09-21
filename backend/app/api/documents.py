@@ -221,14 +221,6 @@ async def upload_document(
         # 处理失败，原始文件没有留存价值，删掉，避免 storage 目录堆积垃圾。
         target.unlink(missing_ok=True)
 
-        # TODO(失败清理)：ingest_txt 是分批写入的，如果它写到一半才失败，
-        #   前面几批的向量已经进了 Milvus，这里没有回滚 —— 因为回滚需要
-        #   「按 document_id 删除向量」，那属于「删除文档」功能，
-        #   本阶段刻意不实现，以免出现两处相似的删除逻辑各自演化。
-        #   在补上之前要注意：这篇文档此时是 failed 状态，但 Milvus 里
-        #   可能残留部分数据，前端不应把 failed 文档的内容当作可检索来源。
-        #   后续清理时用 knowledge_base_id + document_id 两个条件一起删。
-
         # 回给客户端的是通用文案：具体原因已经写进 error_message 和日志了，
         # 这里再重复一遍既啰嗦，又容易顺手把内部细节带出去。
         raise HTTPException(
