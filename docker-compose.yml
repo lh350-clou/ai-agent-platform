@@ -1,0 +1,244 @@
+# ============================================================
+# AI 智能知识库 Agent 平台 —— 一键部署
+#
+# 启动：cp .env.docker.example .env.docker   （填入真实 Key 后）
+#       docker compose up -d --build
+#
+# 访问：http://localhost          前端
+#       http://localhost:8000/docs 接口文档
+#
+# 这套编排【不影响本地开发】：本地照旧 uvicorn + npm run dev，
+# 两种方式用的是同一份代码，只是配置来源不同。
+# ============================================================
+
+name: ai-agent-platform
+
+services:
+  # ------------------------------------------------------------
+  # PostgreSQL：业务数据（知识库、文档、会话、消息）
+  # ------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agent_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # 不写默认值：密码必须有，用 :- 给默认值等于给一个所有人都知道的密码。
+      # 没配的话 compose 会直接报错，比悄悄用一个弱密码好。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置，请先配置 .env.docker}
+    ports:
+      - "5432:5432"
+    volumes:
+      # 命名卷而不是宿主机路径：数据库文件由 Docker 管理，
+      # 不受宿主机目录权限、换机器、路径带空格等因素影响。
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # 用 pg_isready 而不是 tcp 探测：端口开着不代表数据库已经能接受查询，
+      # 而迁移脚本紧接着就会连上来建表。
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ------------------------------------------------------------
+  # etcd / MinIO：Milvus standalone 的两个外部依赖
+  # 下面三个服务的配置来自 Milvus 官方 standalone compose，
+  # 版本与参数都照搬，不自行发挥。
+  # ------------------------------------------------------------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    restart: unless-stopped
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    # 不映射端口：只有 Milvus 需要连它，不需要从宿主机访问。
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-05-28T17-19-04Z
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    # 同样不映射端口。需要看 MinIO 控制台调试时，
+    # 临时加上 "9001:9001" 即可（官方 compose 默认是暴露的，这里按需收敛）。
+
+  # Milvus 3.x 的一次性卷属主初始化。
+  # Milvus 容器以非 root 用户跑，而命名卷刚创建时属主是 root，
+  # 不先改属主的话 Milvus 会因为没有写权限而起不来。
+  # 这个服务跑完就退出，compose 里用 service_completed_successfully 等它。
+  #
+  # 镜像用 v3.0.1 而不是官方 compose 里当前的 v3.0.2：
+  # 本机已经拉过 3.0.1，且整个项目从开发到验证都是针对这个版本做的，
+  # 保持一致可以避免「部署环境和服务端版本不同」带来的排查成本。
+  # 要升级时改这两处 tag 即可，3.0.x 之间接口是兼容的。
+  milvus-volume-init:
+    image: milvusdb/milvus:v3.0.1
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        uid="$$(id -u milvus)"
+        gid="$$(id -g milvus)"
+        marker="/var/lib/milvus/.milvus-volume-owner-$${uid}-$${gid}"
+        if [ ! -e "$${marker}" ]; then
+          echo "Preparing /var/lib/milvus for $${uid}:$${gid}"
+          chown -R "$${uid}:$${gid}" /var/lib/milvus
+          touch "$${marker}"
+          chown "$${uid}:$${gid}" "$${marker}"
+        fi
+    volumes:
+      - milvus_data:/var/lib/milvus
+
+  milvus:
+    image: milvusdb/milvus:v3.0.1
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      MINIO_REGION: us-east-1
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      # start_period 给足 90 秒：Milvus 冷启动要加载索引、连 etcd 和 MinIO，
+      # 比一般服务慢得多。这个窗口内的失败不计入重试次数，
+      # 否则会因为「启动慢」被误判成「启动失败」。
+      start_period: 90s
+    depends_on:
+      milvus-volume-init:
+        condition: service_completed_successfully
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_started
+
+  # ------------------------------------------------------------
+  # 后端：FastAPI + 迁移 + MCP Server（stdio 子进程，不单独暴露）
+  # ------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # 所有配置从 .env.docker 注入。
+    # 真实文件不进版本库（.gitignore 里的 .env.* 已覆盖），
+    # 仓库里只有 .env.docker.example 模板。
+    env_file:
+      - .env.docker
+    ports:
+      - "8000:8000"
+    volumes:
+      # 上传的原始文档必须持久化：
+      # 不挂卷的话，每次 docker compose up --build 重建容器，
+      # 之前上传的文件就全没了，而 PostgreSQL 里的文档记录还在 ——
+      # 表现为「文档列表里有，但重新处理时说文件不存在」。
+      #
+      # 挂到 /app/storage：config.py 以仓库根为基准推算 storage 目录，
+      # 而镜像里仓库根就是 /app（详见 backend/Dockerfile 里的说明）。
+      - backend_storage:/app/storage
+    # 启动顺序：迁移 -> 建 Milvus 集合 -> 起服务。
+    #
+    # 为什么都放在启动命令里而不是 Dockerfile 的构建阶段：
+    # 构建时数据库和 Milvus 都还没起来，而且构建层会被缓存，
+    # 改了模型或集合结构也不会重新执行。
+    #
+    # set -e 很关键：任何一步失败就直接退出，不进入下一步。
+    # 少了它，集合没建起来服务照样启动，然后每个上传/检索请求都 500 ——
+    # 问题被推迟到用户操作时才暴露，比启动失败难查得多。
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "[startup] 执行数据库迁移..."
+        alembic upgrade head
+        echo "[startup] 确保 Milvus 集合存在..."
+        python -c "from app.core.milvus import ensure_collection_exists; ensure_collection_exists()"
+        echo "[startup] 启动 FastAPI..."
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      # 镜像里没有 curl（slim 版不带），用 Python 自带的 urllib。
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+
+  # ------------------------------------------------------------
+  # 前端：Vue 构建产物 + Nginx
+  # ------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 浏览器访问的是宿主机，所以这里必须是 localhost 而不是服务名 backend。
+        # 写成 backend 的话浏览器解析不了这个主机名，请求会直接失败。
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    healthcheck:
+      # nginx:alpine 基于 alpine，自带 wget。
+      #
+      # 这里必须写 127.0.0.1 而不是 localhost：
+      # 容器内 localhost 会先解析到 IPv6 的 ::1，而 nginx 的 `listen 80`
+      # 默认只绑 IPv4（0.0.0.0），于是探测会被拒绝，
+      # 表现为「页面明明能打开，容器却一直是 unhealthy」。
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# 全部使用命名卷：数据由 Docker 管理，不落在宿主机路径上。
+# docker compose down 不会删除它们（要删得显式加 -v）。
+volumes:
+  postgres_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  backend_storage:

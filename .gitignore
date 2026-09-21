@@ -8,6 +8,10 @@
 .env
 .env.*
 !.env.example
+# Docker 部署用的模板（.env.docker 本身仍被上面的 .env.* 挡掉）。
+# 这条例外必须显式写出来：".env.*" 会把 .env.docker.example 一起匹配掉，
+# 结果就是「模板提交不上去」，而它恰恰是唯一该提交的那个文件。
+!.env.docker.example
 
 # ---------- Python 虚拟环境 ----------
 .venv/

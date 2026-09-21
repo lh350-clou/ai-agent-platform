@@ -1,0 +1,23 @@
+# 构建镜像时排除的内容。
+#
+# node_modules 必须排除，否则会踩一个很隐蔽的坑：
+# 宿主机（这里是 Windows）装的 node_modules 会被 COPY 进 Linux 容器，
+# 而里面的二进制依赖（esbuild / rollup 的原生模块）是按 Windows 编译的，
+# 在容器里跑不起来，构建会报「找不到模块」之类的错，
+# 而且错误信息完全指不到真正的原因。
+#
+# 容器里由 `npm ci` 重新装一份 Linux 版本的依赖。
+
+node_modules/
+dist/
+dist-ssr/
+
+# 本地环境变量。前端产物是构建时确定的，这里由 Dockerfile 的
+# ARG VITE_API_BASE_URL 提供，不需要 .env。
+.env
+.env.*
+
+# 编辑器与工具
+.vscode/
+.idea/
+*.log

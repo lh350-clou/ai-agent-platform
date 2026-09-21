@@ -19,10 +19,16 @@ logger = logging.getLogger(__name__)
 
 # ---- 常量 ----
 
-# Milvus 地址。暂时写在这里是因为本轮的改动范围不含 config.py，
-# 等接入 Milvus 的代码稳定后应挪到 settings 里（和 POSTGRES_HOST 一样从 .env 读），
-# 这样切 Docker 部署时改 .env 即可，不用改代码。
-MILVUS_URI: str = "http://localhost:19530"
+# Milvus 地址，从配置读（和 POSTGRES_HOST 一样来自 .env）。
+#
+# 之前这里是硬编码的 "http://localhost:19530"，容器化时必须改 ——
+# 容器里的 localhost 指的是容器自己，而 Milvus 跑在另一个容器里。
+# 现在本机开发照旧（默认值就是 localhost:19530），
+# 切 Docker 只需要在环境变量里把 MILVUS_HOST 写成服务名。
+#
+# 保留模块级常量而不是改成函数调用，是为了让 milvus.MILVUS_URI
+# 这个引用方式在所有已有调用处继续有效。
+MILVUS_URI: str = settings.milvus_uri
 
 # Collection 名在这里定义一次，其他地方一律引用这个常量。
 # 写成常量而不是散落的字符串字面量，是为了避免「一处改名、另一处漏改」——

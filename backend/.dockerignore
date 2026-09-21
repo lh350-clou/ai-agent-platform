@@ -1,0 +1,26 @@
+# 构建镜像时排除的内容。
+#
+# 不加这个文件的话，`COPY . .` 会把下面这些东西一并打进镜像：
+# 缓存、虚拟环境、以及开发时上传的文档 —— 后者可能很大，
+# 而且属于运行数据，不该固化在镜像里。
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 开发时产生的上传文件。容器里这个目录是挂载出来的卷，
+# 镜像里不需要（也不该）带一份。
+storage/
+
+# 本地配置：绝不能进镜像。容器里的配置由 docker-compose 的 env_file 注入。
+.env
+.env.*
+
+# 编辑器与工具
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

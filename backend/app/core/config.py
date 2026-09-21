@@ -122,6 +122,20 @@ class Settings(BaseSettings):
     # 没有超时的话整个 Agent 请求会一直挂在那里，直到 HTTP 层超时。
     MCP_TOOL_TIMEOUT_SECONDS: float = 15.0
 
+    # ---- Milvus 向量库 ----
+    # 拆成主机 + 端口两个字段，和上面的 PostgreSQL 一个路子。
+    #
+    # 这两个值必须可配置，否则容器化根本走不通：
+    # 本机开发时 Milvus 在 localhost，进了 Compose 之后它在 milvus 这个服务名下，
+    # 而容器里的 localhost 指的是容器自己，连不上任何东西。
+    MILVUS_HOST: str = "localhost"
+    MILVUS_PORT: int = 19530
+
+    @property
+    def milvus_uri(self) -> str:
+        """拼出 pymilvus 要的连接串。"""
+        return f"http://{self.MILVUS_HOST}:{self.MILVUS_PORT}"
+
     # ---- 跨域（CORS）----
     # 允许访问后端的前端地址，逗号分隔。
     #
