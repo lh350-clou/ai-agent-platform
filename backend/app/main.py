@@ -5,8 +5,9 @@
     uvicorn app.main:app --reload
 
 启动后访问：
-    http://127.0.0.1:8000/health   健康检查
-    http://127.0.0.1:8000/docs     自动生成的接口文档
+    http://127.0.0.1:8000/health        健康检查
+    http://127.0.0.1:8000/api/chat      对话接口（POST）
+    http://127.0.0.1:8000/docs          自动生成的接口文档
 
 数据库配置从仓库根目录的 .env 读取（见 app/core/config.py），
 仓库里只有 .env.example 模板，需要自己复制一份并填上真实密码。
@@ -18,6 +19,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.chat import router as chat_router
 from app.api.health import router as health_router
 from app.core.config import settings
 from app.core.database import check_connection, engine
@@ -75,6 +77,7 @@ def create_app() -> FastAPI:
     # 注册各模块的路由。后续新增模块时，在这里追加 include_router 即可，
     # 不需要改动已有代码。
     application.include_router(health_router)
+    application.include_router(chat_router)
 
     return application
 
