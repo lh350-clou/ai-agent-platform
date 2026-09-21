@@ -56,6 +56,25 @@ class Settings(BaseSettings):
     POSTGRES_PASSWORD: SecretStr = SecretStr("")
     POSTGRES_DB: str = "agent_db"
 
+    # ---- DeepSeek 大模型 ----
+    # DeepSeek 走 OpenAI 兼容接口，所以这三个配置项和官方 openai SDK 的参数一一对应，
+    # 名字也刻意取得和 SDK 一致（api_key / base_url / model），减少对应关系的记忆成本。
+    #
+    # 为什么用 SecretStr 而不是 str：SecretStr 的 __str__ / __repr__ 只会输出 **********，
+    # 所以哪怕有人不小心 print(settings)、或者把 settings 整个丢进日志，
+    # 密钥也不会跟着泄漏。要用真实值时必须显式调用 .get_secret_value()，
+    # 于是「代码里哪几处碰了明文密钥」一搜就能搜出来。
+    #
+    # 这里给空字符串默认值，是为了让「还没配 Key」时应用照样能启动、能被 import，
+    # 真正的报错推迟到第一次调用模型时（见 services/llm.py），
+    # 而不是在导入配置阶段就把整个服务拦死。
+    DEEPSEEK_API_KEY: SecretStr = SecretStr("")
+    # DeepSeek 官方 API 地址。SDK 会自己在这后面拼 /chat/completions，
+    # 所以这里不要写成 .../v1/chat/completions 这种带路径的形式。
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    # deepseek-chat 是通用对话模型（deepseek-reasoner 是推理模型，本项目暂不用）。
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
     @property
     def database_url(self) -> str:
         """拼接 SQLAlchemy 异步连接串。
