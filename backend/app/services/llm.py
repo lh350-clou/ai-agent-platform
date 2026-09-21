@@ -12,7 +12,12 @@ DeepSeek 官方提供的是「OpenAI 兼容」接口，所以这里直接用 ope
 import logging
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessage,
+    ChatCompletionMessageParam,
+    ChatCompletionToolParam,
+)
 
 from app.core.config import settings
 
@@ -75,15 +80,47 @@ async def chat(
         未配置 Key、网络不通、接口返回 4xx/5xx 时抛 RuntimeError，
         消息里只包含「哪一步出错了」，不含密钥。
     """
+    completion = await _call_completions(messages, temperature)
+
+    # 正常情况下 choices 至少有一项；返回空列表属于异常响应，
+    # 与其让后面 completion.choices[0] 抛出难懂的 IndexError，不如在这里给出明确提示。
+    if not completion.choices:
+        raise RuntimeError("DeepSeek 返回结果中没有 choices，无法取出文本内容")
+
+    # content 理论上可能为 None（例如模型只返回了工具调用），
+    # 用 or "" 兜底成空字符串，避免调用方拿到 None 还要再判一次。
+    return completion.choices[0].message.content or ""
+
+
+async def _call_completions(
+    messages: list[ChatCompletionMessageParam],
+    temperature: float,
+    tools: list[ChatCompletionToolParam] | None = None,
+) -> ChatCompletion:
+    """真正发起一次 chat.completions 请求，并统一处理异常。
+
+    把这段抽出来，是因为调用方从「一种」变成了「两种」：
+    不带工具的普通对话（chat）和带工具的工具调用（chat_with_tools）。
+    两者的差别只在 tools 这一个参数，错误处理完全一样 ——
+    复制一份的话，将来改错误文案或补一种异常处理，就得记得改两处，
+    而漏掉的那一处恰恰最不容易被发现（另一条路径平时不跑）。
+    """
     client = get_llm_client()
 
+    # tools 为空时【不能】把它当成 None 传进去：
+    # 传 tools=None 相当于明确声明「本次没有可用工具」，
+    # 而「不传这个参数」与「传 None」在部分 OpenAI 兼容实现里行为并不一致。
+    # 用展开的方式，只在真的有工具时才带上这个键。
+    extra: dict = {"tools": tools} if tools else {}
+
     try:
-        completion = await client.chat.completions.create(
+        return await client.chat.completions.create(
             # 模型名同样从配置读，不写死在调用处，
             # 将来想换 deepseek-reasoner 只需要改 .env，不用动代码。
             model=settings.DEEPSEEK_MODEL,
             messages=messages,
             temperature=temperature,
+            **extra,
         )
     except APIConnectionError as exc:
         # 网络层失败：DNS 解析不了、超时、连不上 api.deepseek.com。
@@ -100,11 +137,33 @@ async def chat(
             f"DeepSeek 接口返回错误（HTTP {exc.status_code}），详情见服务端日志"
         ) from exc
 
-    # 正常情况下 choices 至少有一项；返回空列表属于异常响应，
-    # 与其让后面 completion.choices[0] 抛出难懂的 IndexError，不如在这里给出明确提示。
-    if not completion.choices:
-        raise RuntimeError("DeepSeek 返回结果中没有 choices，无法取出文本内容")
 
-    # content 理论上可能为 None（例如模型只返回了工具调用），
-    # 用 or "" 兜底成空字符串，避免调用方拿到 None 还要再判一次。
-    return completion.choices[0].message.content or ""
+async def chat_with_tools(
+    messages: list[ChatCompletionMessageParam],
+    tools: list[ChatCompletionToolParam],
+    temperature: float = 0.0,
+) -> ChatCompletionMessage:
+    """带工具的对话：返回模型这一轮的完整消息。
+
+    和 chat() 的区别在于返回什么：
+    chat() 只回文本，够用是因为普通对话里模型只会说话；
+    而工具调用这一轮模型可能【什么都没说、只要求调用工具】，
+    此时 content 是 None，真正有用的信息在 message.tool_calls 里。
+    所以这里把整条消息返回出去，由调用方（agent.py）自己判断该看哪个字段。
+
+    参数：
+        messages:    对话消息列表，含 system 规则、历史、以及上一轮的工具结果。
+        tools:       可用工具的定义列表（OpenAI 规范格式）。
+        temperature: 默认 0.0 —— 比普通对话低得多，这是刻意的：
+                     选哪个工具、传什么参数必须稳定可复现，
+                     0.7 那种「发散」在这里只会让同一个问题时而调工具时而不调。
+
+    异常：
+        未配置 Key、网络不通、接口返回 4xx/5xx 时抛 RuntimeError，消息不含密钥。
+    """
+    completion = await _call_completions(messages, temperature, tools=tools)
+
+    if not completion.choices:
+        raise RuntimeError("DeepSeek 返回结果中没有 choices，无法取出消息")
+
+    return completion.choices[0].message
