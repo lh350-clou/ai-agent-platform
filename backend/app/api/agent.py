@@ -9,6 +9,7 @@
 """
 
 import logging
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -79,5 +80,21 @@ async def run_knowledge_base_agent(
         answer=result.answer,
         # 显式转换而不是直接塞 service 的对象：接口的返回结构由 schema 决定，
         # 不该跟着 service 的内部模型走。
-        tool_calls=[AgentToolCall(**record.model_dump()) for record in result.tool_calls],
+        tool_calls=[_to_agent_tool_call(record) for record in result.tool_calls],
+    )
+
+
+def _to_agent_tool_call(record: Any) -> AgentToolCall:
+    """把 service 层的调用记录映射成对外的响应结构。
+
+    query / top_k 从 arguments 里取而不是让 service 单独维护一份 ——
+    它们是「同一个事实的两种呈现」，分开存就有不一致的可能。
+    非检索工具的参数里没有这两个键，取出来自然是 None。
+    """
+    arguments = record.arguments or {}
+    return AgentToolCall(
+        tool=record.tool,
+        arguments=arguments,
+        query=arguments.get("query"),
+        top_k=arguments.get("top_k"),
     )

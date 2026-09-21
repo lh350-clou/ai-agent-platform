@@ -6,6 +6,8 @@ service 定义的是「程序内部怎么表达结果」，schema 定义的是�
 改的是 schema，不该牵动 service。
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 # 问题文本的长度上限，与其它几个接口保持一致。
@@ -38,9 +40,25 @@ class AgentToolCall(BaseModel):
     混进失败项只会让人误以为检索成功了。
     """
 
-    tool: str = Field(description="工具名", examples=["search_knowledge_base"])
-    query: str = Field(description="实际用于检索的查询文本")
-    top_k: int = Field(description="实际使用的 top_k（可能已被收敛到上限）")
+    tool: str = Field(
+        description="工具名。内置工具是 search_knowledge_base，MCP 工具带 mcp_ 前缀",
+        examples=["search_knowledge_base", "mcp_get_current_time"],
+    )
+    arguments: dict[str, Any] = Field(
+        default_factory=dict,
+        description="本次调用实际使用的参数",
+        examples=[{"query": "Milvus 是什么", "top_k": 3}],
+    )
+    # 下面两个字段是给内置检索工具的便捷入口：它是本项目的核心工具，
+    # 调用方多半只想直接拿到「查了什么词、取了几条」，不想每次去 arguments 里翻。
+    # MCP 工具调用时它们是 null —— 各自的参数在 arguments 里。
+    query: str | None = Field(
+        default=None, description="检索工具实际使用的查询文本；非检索工具为 null"
+    )
+    top_k: int | None = Field(
+        default=None,
+        description="检索工具实际使用的 top_k（可能已被收敛到上限）；非检索工具为 null",
+    )
 
 
 class AgentResponse(BaseModel):

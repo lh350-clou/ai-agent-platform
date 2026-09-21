@@ -107,6 +107,21 @@ class Settings(BaseSettings):
     # 覆盖「恰好等于上限」「超过 1 字节」这些边界情况。
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024
 
+    # ---- MCP（Model Context Protocol）----
+    # MCP Server 的启动方式。
+    #
+    # 这里用「模块名」而不是「完整的命令行」作为配置，是因为 MCP Client 通过
+    # stdio 与之通信：它需要自己拉起 Server 进程，而启动用的解释器必须是
+    # 当前这个（sys.executable）—— 否则换个环境就会出现「命令能跑但依赖不对」。
+    # 把解释器交给代码去填、只把「跑哪个模块」暴露成配置，既保留了可配置性，
+    # 又不会因为配错解释器而启动失败。
+    MCP_SERVER_MODULE: str = "app.mcp_server.server"
+
+    # 单次 MCP 工具调用的超时（秒）。
+    # 必须有这个上限：Server 是本机子进程，万一它卡死（死循环、等待输入），
+    # 没有超时的话整个 Agent 请求会一直挂在那里，直到 HTTP 层超时。
+    MCP_TOOL_TIMEOUT_SECONDS: float = 15.0
+
     @property
     def database_url(self) -> str:
         """拼接 SQLAlchemy 异步连接串。
