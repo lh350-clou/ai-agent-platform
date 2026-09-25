@@ -25,6 +25,7 @@
 | **MCP Tool** | 通过 MCP 协议接入独立工具服务（当前提供时间查询） |
 | **多轮对话与持久化** | `conversation_id` 串联上下文，消息落 PostgreSQL，刷新后数据仍在 |
 | **前后端完整交互** | Vue 3 + TypeScript 界面，通过 REST API 与后端通信 |
+| **三层 Evaluation** | Tool Calling / RAG / Final Answer 三层可重复评测，确定性检查优先 + LLM 判官兜底 |
 | **Docker Compose 一键部署** | 7 个服务编排，含健康检查、迁移自动执行、数据卷持久化 |
 
 ---
@@ -496,7 +497,14 @@ npm run dev          # http://127.0.0.1:5173
 │   │   ├── mcp_server/           # MCP Server（独立进程，不依赖应用）
 │   │   └── main.py               # 应用入口
 │   ├── alembic/versions/         # 数据库迁移
-│   ├── tests/unit/               # pytest 单元测试
+│   ├── tests/
+│   │   ├── unit/                 # pytest 单元测试（不联网，任何机器可跑）
+│   │   └── evals/                # Evaluation V1：三层评测
+│   │       ├── datasets/         #   用例（jsonl，人工标注）
+│   │       ├── graders/          #   判定逻辑（纯函数 + LLM 判官）
+│   │       ├── fixtures/         #   评测语料
+│   │       ├── schemas.py        #   用例与结果模型
+│   │       └── runner.py         #   CLI 入口
 │   ├── pytest.ini                # pytest 配置
 │   ├── Dockerfile
 │   └── requirements.txt
@@ -528,13 +536,49 @@ npm run dev          # http://127.0.0.1:5173
 cd backend && pytest
 ```
 
-当前共 **17 个单元测试**，集中在 Agent 的 Trace 链路上。它们把外部依赖（LLM、MCP、embedding、向量库）
+当前共 **36 个单元测试**，集中在 Agent 的 Trace 链路、工具契约与评测判定逻辑上。它们把外部依赖（LLM、MCP、embedding、向量库）
 全部替换为假实现 —— 不联网、不连库、不起子进程，因此在任何机器上都能跑：
 
 | 文件 | 覆盖内容 |
 | --- | --- |
 | `tests/unit/test_trace.py` | `trace_id` 生成（uuid4 形状与唯一性）、LLM 调用与工具调用的耗时记录、失败标记、`finish()` 的幂等与错误记录、**异常不被 Trace 吞掉** |
 | `tests/unit/test_agent_trace.py` | 每次模型调用与工具调用的耗时、轮数、工具失败不使 Agent 崩溃、被拒绝的工具调用记为失败、强制收敛路径、异常时 `trace.error` 记录、接口层的字段映射 |
+| `tests/unit/test_agent_tool_contract.py` | **工具契约**：`top_k` 超过上限收敛到 5、范围内原样保留、`0`/负数/非整数被拒绝（不收敛）、`query` 先 strip 再校验长度、超长拒绝、`knowledge_base_id` 等多余字段被静默丢弃 |
+| `tests/unit/test_eval_tool_calling_grader.py` | 评测 grader 的 `tool_selection` F1 计算：选对为 1、**全选错必须为 0**（这里出过一个把「工具全选错」记成满分的 bug）、双方都为空为 1、部分命中落在 (0,1)、`allow_extra_tools` 只放过多调不放过漏调 |
+
+> `top_k` 的边界为什么是单测而不是评测用例：顺着 Agent 的执行路径走，模型给出 `top_k=1000` 时，**有**收敛逻辑就改成 5 并通过校验，**没有**收敛逻辑就被范围校验整次拒绝、`arguments` 保持 `{}`。两种情况下观测到的 `top_k` 都不超过 5，所以在评测数据集里写「`top_k <= 5`」是一条**不可能失败**的断言。真正能区分「有收敛」和「没收敛」的只有直接调函数的单测。
+
+### Evaluation（三层评测）
+
+`backend/tests/evals/` 是一套**可重复运行**的三层评测，跑在真实链路上，用来回答「改动之后系统是变好了还是变差了」：
+
+| 层 | 评什么 | 指标 |
+| --- | --- | --- |
+| **Tool Calling** | 模型有没有选对工具、传对参数、调对次数 | Selection（F1）/ Arguments（逐字段匹配器）/ Call Count / Order（子序列）/ Error |
+| **RAG** | **直接评检索结果**，完全不经过模型、不看答案 | Hit@K / Recall@K / MRR / 非空归因 |
+| **Final Answer** | 答案对不对、切不切题、有没有依据 | 拒答判定 / 事实子串 / 禁用词（确定性）+ Relevance / Groundedness（LLM 判官） |
+
+```bash
+cd backend
+python -m tests.evals.runner --layer all
+python -m tests.evals.runner --layer rag
+python -m tests.evals.runner --layer tool_calling --limit 10
+python -m tests.evals.runner --layer final_answer --no-judge --limit 10
+```
+
+报告写到 `backend/tests/evals/reports/<run_id>.json`。完整说明见 [`backend/tests/evals/README.md`](backend/tests/evals/README.md)。
+
+几个值得说的设计取舍：
+
+- **评测与生产解耦**：`evals` 只 import `app.services.*`，`app/` 下没有任何一处反向依赖。三层跑的都是生产链路的真实函数，一行检索或 Agent 逻辑都没有重写。
+- **确定性检查优先**：事实正确性靠子串匹配、拒答靠标记、参数靠匹配器，全部可复现。LLM 判官只用在真正需要语义理解的 Relevance / Groundedness 上（占 35% 权重），并固定 `temperature=0.0`。
+- **RAG 不经答案判断**：数据集里连 `answer` 字段都没有。「检索没找到」和「找到了但没用好」必须分开归因，否则调优方向会被带偏。
+- **`invalid` 与 `failed` 分开**：接口挂了、判官输出看不懂记为 `invalid`，且**从 `pass_rate` 的分母里排除** —— 一次网络抖动不该看起来像能力退化。
+- **不落库、不改 schema**：评测语料用 uuid5 派生的裸 `knowledge_base_id` 只写 Milvus，PostgreSQL 一行都不写，因此不需要建库、不需要跑迁移；运行前先清空、运行后在 `finally` 里清理。
+
+### 真实链路验证
+
+以下验证跑在真实的 DeepSeek / Milvus / MCP Server 上（这部分目前仍是临时脚本，尚未纳入版本库）。
 
 ### 真实链路验证
 
@@ -556,8 +600,9 @@ cd backend && pytest
 
 **尚未覆盖**
 
-- 自动化用例目前只覆盖 Agent Trace 链路；文档解析与切分、向量入库、知识库级联删除、MCP 会话生命周期等模块仍依赖人工验证。
-- 真实链路验证需要外部服务与 API Key，尚未整理成可重复运行的集成测试。
+- 单元用例目前只覆盖 Agent Trace 链路与评测 grader；文档解析与切分、向量入库、知识库级联删除、MCP 会话生命周期等模块仍依赖人工验证。
+- 真实链路验证需要外部服务与 API Key，尚未整理成可重复运行的集成测试（Evaluation 那三层已经纳入了版本库，但它们需要真实服务，不随 `pytest` 一起跑）。
+- Evaluation 尚未覆盖：Reliability（同一数据集多次运行的方差）、回归 Dashboard、`/ask` 路径的最终答案评测。
 
 ---
 
@@ -612,5 +657,5 @@ Vue 3 + TypeScript 界面，包含知识库管理、对话、工具调用展示�
 - **对话管理**：会话列表、重命名、单独删除的 API 与界面
 - **更多 MCP Tools**：当前 MCP Client / Server 架构支持扩展多个工具，后续可继续增加时间查询之外的工具。
 - **Agent 可观测性**：工具调用链路追踪与耗时统计已落地（见「运行记录（Trace）」），后续补充失败率统计与 Trace 持久化
-- **测试体系**：Agent Trace 链路已有 pytest 用例，后续把真实链路验证整理成可重复运行的集成测试，并补齐其余模块的用例
+- **测试体系**：Agent Trace 链路与评测 grader 已有 pytest 用例，三层 Evaluation 已可重复运行；后续把其余真实链路验证也整理成可重复运行的集成测试，并补齐其余模块的用例
 - **检索优化**：相似度阈值、混合检索（关键词 + 向量）、重排序
