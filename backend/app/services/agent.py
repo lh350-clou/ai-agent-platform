@@ -26,6 +26,7 @@ from app.models.message import Message
 from app.services import llm, mcp_client, vector_store
 from app.services.conversation import history_to_messages
 from app.services.embedding import embed_text
+from app.services.trace import ToolCallTrace, Trace, TraceContext, format_error
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,9 @@ class _ToolContext:
     # 允许检索的知识库。内部工具用它，MCP 工具用不到，
     # 但它是「模型无法影响」这件事的具体体现，放在这里最显眼。
     knowledge_base_id: UUID
+    # 本次 Run 的运行记录收集器。工具执行是「往哪记」的一个天然落点：
+    # 计时、成败、实际参数在这里全都拿得到，不用再往上层传一遍。
+    trace: TraceContext
     # MCP 会话。None 表示本次 MCP 不可用 —— 此时 MCP 工具根本不会出现在
     # 模型可见的工具列表里，所以走到执行阶段也不会遇到。
     mcp_session: Any | None = None
@@ -171,10 +175,17 @@ class _ToolContext:
 
 
 class AgentResult(BaseModel):
-    """run_agent 的返回值。"""
+    """run_agent 的返回值。
+
+    trace 和 tool_calls 的关系：tool_calls 是「给用户看的」——只列真正执行过的
+    调用和它用的参数，用来解释这个回答是怎么来的；trace 是「给运维和调优看的」
+    ——多出耗时、成败、轮数，还包括被拒绝的调用。两者刻意不合并：
+    合成一个模型的话，接口想少暴露一个字段就得连带改动内部记录。
+    """
 
     answer: str
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    trace: Trace
 
 
 def _normalize_tool_arguments(raw: dict[str, Any]) -> dict[str, Any]:
@@ -219,6 +230,18 @@ def _error_result(message: str) -> str:
     return json.dumps({"error": message})
 
 
+def _failed_call(call: ToolCallTrace, reason: str) -> str:
+    """把这次工具调用标记为失败，并返回给模型的错误文本。
+
+    一次调用要失败时，这两件事【永远成对发生】：忘了标记，Trace 里就会出现
+    一条「成功但什么都没查到」的假记录；忘了返回，函数就会继续往下走。
+    所以捆成一个函数，让失败路径都写成一行 return，
+    也就不存在「只做了一半」这种可能。
+    """
+    call.mark_failed(reason)
+    return _error_result(reason)
+
+
 async def _execute_tool(tool_name: str, raw_arguments: str, ctx: _ToolContext) -> str:
     """执行一次工具调用，返回要回给模型的字符串。
 
@@ -231,21 +254,35 @@ async def _execute_tool(tool_name: str, raw_arguments: str, ctx: _ToolContext) -
       - 名字带 MCP 前缀、且是本次发现到的 -> 交给 MCP Client 执行
     其余一律拒绝。模型给出的只是一个字符串，能不能执行由这里说了算，
     而不是由它自己声称。
+
+    整段逻辑被 trace.tool_call() 包住，于是每次工具调用都会留下一条记录。
+    被拒绝的调用【同样记录】、只是 success=False —— 「模型请求了一个不存在的
+    工具」恰恰是排查 Agent 行为时最需要的线索，只记成功的反而把线索丢了。
     """
-    # ---- 1. 白名单校验：内置工具 ----
-    if tool_name in ALLOWED_TOOLS:
-        return await _execute_search_tool(raw_arguments, ctx)
+    # 计时包住的是整次调用，而不是只有「真正查库」那一下：
+    # 参数解析、校验、结果序列化都在为这次调用服务，它们的耗时同样算在用户等待里。
+    async with ctx.trace.tool_call(tool_name) as call:
+        # ---- 1. 白名单校验：内置工具 ----
+        if tool_name in ALLOWED_TOOLS:
+            return await _execute_search_tool(raw_arguments, ctx, call)
 
-    # ---- 2. 白名单校验：MCP 工具 ----
-    if tool_name.startswith(mcp_client.MCP_TOOL_PREFIX):
-        return await _execute_mcp_tool(tool_name, raw_arguments, ctx)
+        # ---- 2. 白名单校验：MCP 工具 ----
+        if tool_name.startswith(mcp_client.MCP_TOOL_PREFIX):
+            return await _execute_mcp_tool(tool_name, raw_arguments, ctx, call)
 
-    logger.warning("模型请求了白名单之外的工具，已拒绝执行：%r", tool_name)
-    return _error_result("tool not allowed")
+        logger.warning("模型请求了白名单之外的工具，已拒绝执行：%r", tool_name)
+        return _failed_call(call, "tool not allowed")
 
 
-async def _execute_search_tool(raw_arguments: str, ctx: _ToolContext) -> str:
-    """执行内置的知识库检索工具。"""
+async def _execute_search_tool(
+    raw_arguments: str, ctx: _ToolContext, call: ToolCallTrace
+) -> str:
+    """执行内置的知识库检索工具。
+
+    call 是本次调用的 Trace 记录，由 _execute_tool 建好后传进来：
+    只有这个函数知道「参数最终收敛成了什么」，也只有在它内部才知道检索成没成功，
+    所以由它把这两件事补进记录里。
+    """
     # ---- 解析参数 ----
     # 模型返回的 arguments 是一个 JSON 字符串，但它完全是模型生成的，
     # 可能不是合法 JSON、可能不是对象（比如直接给个字符串）。
@@ -254,11 +291,11 @@ async def _execute_search_tool(raw_arguments: str, ctx: _ToolContext) -> str:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
         logger.warning("工具参数不是合法 JSON，已拒绝执行：%r", raw_arguments[:200])
-        return _error_result("invalid tool arguments")
+        return _failed_call(call, "invalid tool arguments")
 
     if not isinstance(parsed, dict):
         logger.warning("工具参数不是 JSON 对象，已拒绝执行：%r", type(parsed).__name__)
-        return _error_result("invalid tool arguments")
+        return _failed_call(call, "invalid tool arguments")
 
     # ---- 3. 模型试图指定知识库？丢弃并告警 ----
     # 这是本模块最需要防的一件事。工具定义里没有这个参数，
@@ -275,14 +312,15 @@ async def _execute_search_tool(raw_arguments: str, ctx: _ToolContext) -> str:
         args = SearchToolArgs.model_validate(_normalize_tool_arguments(parsed))
     except ValidationError as exc:
         logger.warning("工具参数校验失败，已拒绝执行：%s", exc.errors()[:3])
-        return _error_result("invalid tool arguments")
+        return _failed_call(call, "invalid tool arguments")
 
     # ---- 5. 执行 ----
+    # 参数到这一步才算定下来（top_k 可能被收敛过、多余的键已被丢弃），
+    # 所以 Trace 里记的是【实际使用的参数】而不是模型原样给的那份 ——
+    # 排查「为什么只查到 5 条」时，要看的是收敛后的值。
+    call.arguments = {"query": args.query, "top_k": args.top_k}
     ctx.executed.append(
-        ToolCallRecord(
-            tool=SEARCH_TOOL_NAME,
-            arguments={"query": args.query, "top_k": args.top_k},
-        )
+        ToolCallRecord(tool=SEARCH_TOOL_NAME, arguments=call.arguments)
     )
 
     try:
@@ -295,12 +333,14 @@ async def _execute_search_tool(raw_arguments: str, ctx: _ToolContext) -> str:
         )
     except Exception:
         logger.exception("工具执行失败：tool=%s", SEARCH_TOOL_NAME)
-        return _error_result("knowledge base search failed")
+        return _failed_call(call, "knowledge base search failed")
 
     return _format_search_result(hits)
 
 
-async def _execute_mcp_tool(tool_name: str, raw_arguments: str, ctx: _ToolContext) -> str:
+async def _execute_mcp_tool(
+    tool_name: str, raw_arguments: str, ctx: _ToolContext, call: ToolCallTrace
+) -> str:
     """通过 MCP Client 执行一个 MCP 工具。
 
     这里是「Agent 不直接 import mcp_server」这条约束的落点：
@@ -315,31 +355,43 @@ async def _execute_mcp_tool(tool_name: str, raw_arguments: str, ctx: _ToolContex
     # 两者都会被这里挡下。名单来自发现结果，不来自模型的声称。
     if original_name not in ctx.mcp_tool_names:
         logger.warning("模型请求了本次未发现的 MCP 工具，已拒绝：%r", original_name)
-        return _error_result("tool not allowed")
+        return _failed_call(call, "tool not allowed")
 
     if ctx.mcp_session is None:
         # 正常不会走到：MCP 不可用时，这些工具根本不会出现在模型可见的列表里。
         # 留着是为了「就算走到也只会得到一句安全错误」，而不是 None 解引用崩掉。
         logger.warning("MCP 会话不可用，拒绝执行：%r", original_name)
-        return _error_result("mcp unavailable")
+        return _failed_call(call, "mcp unavailable")
 
     # 参数解析。和内置工具同一套处理：模型给的 JSON 字符串不可信。
     try:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
         logger.warning("MCP 工具参数不是合法 JSON：%r", raw_arguments[:200])
-        return _error_result("invalid tool arguments")
+        return _failed_call(call, "invalid tool arguments")
 
     if not isinstance(parsed, dict):
         logger.warning("MCP 工具参数不是 JSON 对象：%r", type(parsed).__name__)
-        return _error_result("invalid tool arguments")
+        return _failed_call(call, "invalid tool arguments")
 
     # 参数的具体校验交给 MCP Server —— 它才是这个工具的定义方，
     # 手里有 input_schema。Client 这边再做一遍等于把工具语义抄一份，
     # 抄错了反而更糟。Server 拒绝时会返回错误，call_tool 会把它
     # 转成安全的错误文本，不会让异常穿出去。
+    #
+    # 这里不做任何参数过滤：MCP 工具的参数由各自的 Server 定义，
+    # Agent 无从知道哪个字段是敏感的，所以原样记录、原样转发。
+    call.arguments = parsed
     ctx.executed.append(ToolCallRecord(tool=tool_name, arguments=parsed))
-    return await mcp_client.call_tool(ctx.mcp_session, original_name, parsed)
+
+    content, error = await mcp_client.call_tool(ctx.mcp_session, original_name, parsed)
+    if error is not None:
+        # call_tool 把失败转成了错误文本，异常不会穿出去；但「没成功」这件事
+        # 必须记进 Trace，否则一条失败的 MCP 调用会在记录里显示成成功的。
+        # 错误文本本身照旧回给模型，行为不变。
+        call.mark_failed(error)
+
+    return content
 
 
 def _assistant_message_payload(message: Any) -> dict[str, Any]:
@@ -381,7 +433,7 @@ async def run_agent(
                            service 层不碰数据库，保持「给什么就用什么」。
 
     返回：
-        AgentResult：最终回答 + 本次实际执行过的工具调用列表。
+        AgentResult：最终回答 + 本次实际执行过的工具调用列表 + 本次运行的 Trace。
 
     异常：
         RuntimeError：调用 DeepSeek 失败，或模型在限定轮数内始终没有给出回答。
@@ -404,23 +456,54 @@ async def run_agent(
     messages.extend(history_to_messages(history or []))
     messages.append({"role": "user", "content": question})
 
-    # 一次请求只开一个 MCP 会话，用完由 ExitStack 统一关闭。
-    # 会话要在【循环之外】打开：循环里每一轮都可能调用 MCP 工具，
-    # 每轮开关一次会话就等于每轮重启一个 Python 子进程。
-    async with AsyncExitStack() as stack:
-        mcp_session, mcp_tools, mcp_names = await _open_mcp(stack)
+    # 本次 Run 的运行记录。它是【旁路】：只观察，不参与任何业务判断 ——
+    # 从头到尾没有一处逻辑读它来决定下一步做什么。
+    trace = TraceContext()
 
-        ctx = _ToolContext(
-            knowledge_base_id=knowledge_base_id,
-            mcp_session=mcp_session,
-            mcp_tool_names=mcp_names,
+    try:
+        # 一次请求只开一个 MCP 会话，用完由 ExitStack 统一关闭。
+        # 会话要在【循环之外】打开：循环里每一轮都可能调用 MCP 工具，
+        # 每轮开关一次会话就等于每轮重启一个 Python 子进程。
+        async with AsyncExitStack() as stack:
+            mcp_session, mcp_tools, mcp_names = await _open_mcp(stack)
+
+            ctx = _ToolContext(
+                knowledge_base_id=knowledge_base_id,
+                trace=trace,
+                mcp_session=mcp_session,
+                mcp_tool_names=mcp_names,
+            )
+
+            # 工具列表 = 内置工具 + 本次发现的 MCP 工具。
+            # 两者对模型是平权的，它只需要挑合适的那个，不关心工具来自哪里。
+            tool_schemas = list(TOOLS) + [mcp_client.to_openai_tool(t) for t in mcp_tools]
+
+            answer, tool_calls = await _run_loop(messages, tool_schemas, ctx)
+    except Exception as exc:
+        # 失败也要留下记录，然后【原样抛出】原来的异常 ——
+        # Trace 是旁路，不能因为「想记一笔」而把异常换成别的、或者吞掉：
+        # 上层（api/agent.py）靠异常类型判断该怎么回应用户，改变错误语义
+        # 就是在悄悄改接口行为。
+        # 这里额外写一行日志：失败时 Trace 随异常一起被丢掉，不给它一个出口，
+        # 「记录 error」就等于什么都没记。
+        trace.finish(error=format_error(exc))
+        logger.error(
+            "Agent Run 失败：trace_id=%s iterations=%d llm_calls=%d tool_calls=%d error=%s",
+            trace.trace.trace_id,
+            trace.trace.iterations,
+            len(trace.trace.llm_calls),
+            len(trace.trace.tool_calls),
+            trace.trace.error,
         )
+        raise
 
-        # 工具列表 = 内置工具 + 本次发现的 MCP 工具。
-        # 两者对模型是平权的，它只需要挑合适的那个，不关心工具来自哪里。
-        tool_schemas = list(TOOLS) + [mcp_client.to_openai_tool(t) for t in mcp_tools]
-
-        return await _run_loop(messages, tool_schemas, ctx)
+    # AgentResult 在这里构造（而不是在 _run_loop 里），就是因为它要带上 Trace，
+    # 而 Trace 必须等整个 Run 结束、finish() 补上总耗时之后才算完整。
+    return AgentResult(
+        answer=answer,
+        tool_calls=tool_calls,
+        trace=trace.finish(),
+    )
 
 
 async def _open_mcp(
@@ -451,16 +534,30 @@ async def _run_loop(
     messages: list[ChatCompletionMessageParam],
     tool_schemas: list[ChatCompletionToolParam],
     ctx: _ToolContext,
-) -> AgentResult:
-    """工具调用主循环：调模型 → 执行工具 → 再调模型，直到模型给出回答。"""
+) -> tuple[str, list[ToolCallRecord]]:
+    """工具调用主循环：调模型 → 执行工具 → 再调模型，直到模型给出回答。
+
+    返回 (最终回答, 本次实际执行过的工具调用列表)。
+
+    不直接返回 AgentResult，是因为那个模型里要带上 Trace，而 Trace 得等整个
+    Run 结束、补上总耗时和错误之后才算完整 —— 那一步在 run_agent 里，
+    于是 AgentResult 也就一并由它构造，避免出现「先造一个半成品、再回头改它」。
+    """
     for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
-        message = await llm.chat_with_tools(messages, tools=tool_schemas)
+        # 每调一次模型算一轮。记在【调用之前】：这样即使这一轮抛异常，
+        # Trace 里也已经能看出「跑到第几轮崩的」。
+        ctx.trace.count_iteration()
+
+        # 计时包住整个模型调用（含网络等待）。这正是用户感知到的等待，
+        # 也是排查「这次回答为什么慢」时第一个要看的数。
+        async with ctx.trace.llm_call(model=llm.model_name()):
+            message = await llm.chat_with_tools(messages, tools=tool_schemas)
 
         # 没有工具调用 = 模型认为可以直接回答，循环结束。
         # 这是正常出口，绝大多数问题第一次调用就会走这里（不需要检索）或
         # 第二次调用走这里（检索完之后作答）。
         if not message.tool_calls:
-            return AgentResult(answer=message.content or "", tool_calls=ctx.executed)
+            return message.content or "", ctx.executed
 
         logger.info(
             "第 %d 轮：模型请求调用 %d 个工具", iteration, len(message.tool_calls)
@@ -494,5 +591,10 @@ async def _run_loop(
     logger.warning(
         "模型连续 %d 轮都要求调用工具，已强制收敛为直接作答", MAX_TOOL_ITERATIONS
     )
-    answer = await llm.chat(messages)
-    return AgentResult(answer=answer, tool_calls=ctx.executed)
+    # 这次收尾的对话也算一次 LLM 调用，但它【不计入 iterations】——
+    # iterations 记的是「模型-工具往返了几轮」，这是模型陷入循环的证据；
+    # 把这最后一次也算进去，就会把 5 轮的失控读成 6 轮的正常往返。
+    async with ctx.trace.llm_call(model=llm.model_name()):
+        answer = await llm.chat(messages)
+
+    return answer, ctx.executed

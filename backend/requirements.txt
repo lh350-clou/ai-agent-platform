@@ -73,3 +73,15 @@ pymilvus>=3.0.2
 # 注意这是 2.x：FastMCP 在这个大版本里已经改名为 MCPServer
 # （mcp.server.mcpserver），网上大量基于 1.x 的示例代码在这个版本上跑不起来。
 mcp>=2.2.0
+
+# ---------- 测试 ----------
+
+# 测试框架。放在这里而不是单独开一个 requirements-dev.txt：
+# 本项目只有一个环境，拆成两份清单会多出「装哪个」的判断成本，
+# 而多装的这点体积对镜像没有实际影响。
+# 跑法：cd backend && pytest（配置见 backend/pytest.ini）
+pytest>=8.0
+
+# pytest 的异步支持：run_agent、Trace 的异步上下文管理器都是协程，
+# 没有它就只能把每个用例包在 asyncio.run() 里，噪音比依赖本身还大。
+pytest-asyncio>=0.24

@@ -20,9 +20,10 @@ from app.core.database import get_db
 from app.models.conversation import Conversation
 from app.models.knowledge_base import KnowledgeBase
 from app.models.message import Message
-from app.schemas.agent import AgentRequest, AgentResponse, AgentToolCall
+from app.schemas.agent import AgentLLMCall, AgentRequest, AgentResponse, AgentToolCall
 from app.services.agent import run_agent
 from app.services.conversation import load_recent_messages
+from app.services.trace import LLMCallTrace
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,21 @@ def _to_agent_tool_call(record: Any) -> AgentToolCall:
     )
 
 
+def _to_agent_llm_call(record: LLMCallTrace) -> AgentLLMCall:
+    """把 service 层的 LLM 调用记录映射成对外的响应结构。
+
+    逐字段搬运而不是直接把内部模型塞进响应：接口的返回结构由 schema 决定，
+    将来 Trace 里多加一个字段（比如 token 用量），也不会自动漏到接口上 ——
+    要暴露就得有人在这里显式写一行，这个「多一步」正是它存在的意义。
+    """
+    return AgentLLMCall(
+        model=record.model,
+        duration_ms=record.duration_ms,
+        success=record.success,
+        error=record.error,
+    )
+
+
 @router.post(
     "/{knowledge_base_id}/agent",
     response_model=AgentResponse,
@@ -69,7 +85,8 @@ async def run_knowledge_base_agent(
         request:           question（1~2000 字符）和可选的 conversation_id。
 
     返回：
-        200 + conversation_id、answer 和本次实际执行过的 tool_calls。
+        200 + conversation_id、answer、本次实际执行过的 tool_calls，
+        以及本次运行的 trace_id / iterations / llm_calls / total_duration_ms。
 
     异常：
         404 知识库不存在，或会话不存在 / 不属于该知识库；
@@ -191,10 +208,18 @@ async def run_knowledge_base_agent(
             detail="保存回答失败，请稍后重试",
         ) from exc
 
+    # run_agent 保证返回前已经 finish() 过，所以这里的 total_duration_ms
+    # 一定是真实耗时，而不是「还没开始计」的 0。
+    trace = result.trace
+
     return AgentResponse(
         conversation_id=conversation.id,
         answer=result.answer,
         # 显式转换而不是直接塞 service 的对象：接口的返回结构由 schema 决定，
         # 不该跟着 service 的内部模型走。
         tool_calls=[_to_agent_tool_call(record) for record in result.tool_calls],
+        trace_id=trace.trace_id,
+        iterations=trace.iterations,
+        llm_calls=[_to_agent_llm_call(record) for record in trace.llm_calls],
+        total_duration_ms=trace.total_duration_ms,
     )

@@ -134,8 +134,10 @@ sequenceDiagram
     D-->>A: 最终回答
 
     API->>DB: 保存 assistant message
-    API-->>U: conversation_id + answer + tool_calls
+    API-->>U: conversation_id + answer + tool_calls + trace
 ```
+
+全程用轻量 Trace 记录每一轮模型调用与工具调用的耗时、成败（见下文「运行记录」）。
 
 Agent 与固定的 RAG 问答（`/ask`）的区别在于**「要不要检索」的判断权**：`/ask` 每次都固定先检索再作答；`/agent` 把这个问题交给模型，所以「你好」这类寒暄不会被硬塞进一堆无关检索结果。
 
@@ -330,7 +332,14 @@ Content-Type: application/json
       "query": "Milvus 是什么",
       "top_k": 5
     }
-  ]
+  ],
+  "trace_id": "3f2a1c8e-9b4d-4f0a-8f1e-2b6c7d5a9e10",
+  "iterations": 2,
+  "llm_calls": [
+    { "model": "deepseek-chat", "duration_ms": 640.2, "success": true, "error": null },
+    { "model": "deepseek-chat", "duration_ms": 1180.05, "success": true, "error": null }
+  ],
+  "total_duration_ms": 1820.4
 }
 ```
 
@@ -341,6 +350,24 @@ Content-Type: application/json
 ```
 
 `tool_calls` 记录本轮实际执行过的工具（内置工具与 MCP 工具都会出现），便于解释「答案是怎么来的」。
+
+#### 运行记录（Trace）
+
+响应里的 `trace_id` / `iterations` / `llm_calls` / `total_duration_ms` 是这一次运行的轻量运行记录：
+
+| 字段 | 含义 |
+| --- | --- |
+| `trace_id` | 本次运行的唯一标识，服务端日志里按它就能捞到同一轮的完整记录 |
+| `iterations` | 「调模型 → 执行工具」循环了几轮；等于 5 说明模型在打转、已被强制收敛 |
+| `llm_calls` | 每一次模型调用的耗时与成败（`success=false` 时 `error` 给出原因） |
+| `total_duration_ms` | 从收到问题到拿到回答的总耗时 |
+
+它的用途是回答「这一轮慢在哪、卡在哪」：比如 `total_duration_ms` 远大于 `llm_calls`
+的耗时之和，说明时间花在检索上；`iterations` 顶到 5 则说明模型在反复调工具。
+
+Trace 只在当前请求内存在，不落库。服务端内部还会额外记录被拒绝的工具调用
+（模型请求了白名单之外的工具），这类信息不通过接口暴露，只体现在日志里。
+出于安全考虑，Trace 不记录 API Key、完整 prompt 或消息内容。
 
 ### 删除知识库
 
@@ -464,10 +491,13 @@ npm run dev          # http://127.0.0.1:5173
 │   │   │   ├── mcp_client.py     #   MCP 客户端
 │   │   │   ├── conversation.py   #   会话历史
 │   │   │   ├── knowledge_base.py #   知识库与级联清理
+│   │   │   ├── trace.py          #   Agent 运行记录（轻量 Trace）
 │   │   │   └── document/         #   解析 → 切分 → 入库
 │   │   ├── mcp_server/           # MCP Server（独立进程，不依赖应用）
 │   │   └── main.py               # 应用入口
 │   ├── alembic/versions/         # 数据库迁移
+│   ├── tests/unit/               # pytest 单元测试
+│   ├── pytest.ini                # pytest 配置
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/
@@ -489,23 +519,45 @@ npm run dev          # http://127.0.0.1:5173
 
 ## 测试与验证
 
-**当前仓库中没有提交自动化测试代码**，也没有引入 pytest 等测试依赖。以下是开发过程中实际执行过的验证，都是临时脚本，未纳入版本库 —— 这一点如实说明，避免误导。
+### 自动化测试
 
-**已完成的验证**
+仓库中有可运行的 pytest 测试套件：用例位于 `backend/tests/unit/`，配置见 `backend/pytest.ini`，
+依赖 `pytest` / `pytest-asyncio` 已写入 `backend/requirements.txt`。
+
+```bash
+cd backend && pytest
+```
+
+当前共 **17 个单元测试**，集中在 Agent 的 Trace 链路上。它们把外部依赖（LLM、MCP、embedding、向量库）
+全部替换为假实现 —— 不联网、不连库、不起子进程，因此在任何机器上都能跑：
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `tests/unit/test_trace.py` | `trace_id` 生成（uuid4 形状与唯一性）、LLM 调用与工具调用的耗时记录、失败标记、`finish()` 的幂等与错误记录、**异常不被 Trace 吞掉** |
+| `tests/unit/test_agent_trace.py` | 每次模型调用与工具调用的耗时、轮数、工具失败不使 Agent 崩溃、被拒绝的工具调用记为失败、强制收敛路径、异常时 `trace.error` 记录、接口层的字段映射 |
+
+### 真实链路验证
+
+以下验证跑在真实的 DeepSeek / Milvus / MCP Server 上（这部分目前仍是临时脚本，尚未纳入版本库）。
 
 | 类别 | 内容 |
 | --- | --- |
+| Agent E2E | 问题 → DeepSeek → `search_knowledge_base` → Milvus → 工具结果 → DeepSeek → 最终回答；响应中的 `trace_id` / `iterations` / `llm_calls` / `total_duration_ms` / `tool_calls` 全部正确回填（见「运行记录（Trace）」） |
+| MCP E2E | 问题 → DeepSeek → MCP 工具 → MCP Server（独立进程）→ 工具结果 → DeepSeek → 最终回答；实际拉起 MCP Server、发现工具、调用并取回结果 |
+| 工具轮数与收敛 | `MAX_TOOL_ITERATIONS = 5` 生效，用满后强制收敛为直接作答（收敛那一次走不带工具的 `chat()`，且不计入 `iterations`） |
+| 工具失败不中断 | 检索链路不可用时，错误作为工具结果回给模型，Agent 照常作答而不是整体失败；Trace 中记为 `success=false`，详细堆栈只进日志 |
+| 安全边界 | 诱导模型在工具参数里指定 `knowledge_base_id` 无效（实际参数只有 `query` / `top_k`）；内置白名单与 MCP 动态白名单均拒绝名单外的工具名；提示词注入（知识库内容与历史消息两个入口）、模型伪造工具参数、内部异常不泄漏 |
+| 消息结构 | `assistant`（含 `tool_calls`）消息先于对应的 `role=tool` 消息，且 `tool_call_id` 一一对应 |
+| 会话持久化 | 会话与消息落 PostgreSQL；多轮请求复用同一 `conversation_id`，每轮生成新的 `trace_id`，历史条数有上限，跨知识库会话被拒绝，Agent 失败时不产生虚假回答 |
 | 接口功能测试 | 知识库 CRUD、文档上传/删除、检索、问答、Agent 各接口的正常路径与错误路径；覆盖参数校验边界（名称长度、描述长度、top_k 范围、空问题、超长输入） |
 | `/ask` 回归测试 | 抽取共享模块后单独验证行为未变，含角色白名单过滤（构造 `role=system` 的脏数据，确认被拦下） |
-| Agent 多轮测试 | 会话创建与复用、消息落库、历史条数上限、跨知识库会话拒绝、Agent 失败时不产生虚假回答 |
-| 安全测试 | 提示词注入（知识库内容与历史消息两个入口）、模型伪造工具参数、未知工具名、内部异常不泄漏 |
 | 前端构建 | `vue-tsc -b && vite build` 通过，无类型错误，全程未使用 `any` |
 | Docker E2E | 完整栈启动后跑通：建库 → 上传 → 检索 → Agent 多轮 → MCP 工具 → 删除 → 数据清零 |
-| MCP 验证 | 容器内实际拉起 MCP Server、发现工具、调用并取回结果 |
 
-**建议补齐**
+**尚未覆盖**
 
-项目缺少可持续运行的测试套件。后续会把上述临时验证整理成 `pytest` 用例纳入仓库，重点覆盖数据一致性（删除时的三处清理）与安全边界。
+- 自动化用例目前只覆盖 Agent Trace 链路；文档解析与切分、向量入库、知识库级联删除、MCP 会话生命周期等模块仍依赖人工验证。
+- 真实链路验证需要外部服务与 API Key，尚未整理成可重复运行的集成测试。
 
 ---
 
@@ -559,6 +611,6 @@ Vue 3 + TypeScript 界面，包含知识库管理、对话、工具调用展示�
 - **用户认证与权限**：知识库级别的访问控制
 - **对话管理**：会话列表、重命名、单独删除的 API 与界面
 - **更多 MCP Tools**：当前 MCP Client / Server 架构支持扩展多个工具，后续可继续增加时间查询之外的工具。
-- **Agent 可观测性**：工具调用链路追踪、耗时统计、失败率监控
-- **测试体系**：把开发期的临时验证整理为可运行的 pytest 套件
+- **Agent 可观测性**：工具调用链路追踪与耗时统计已落地（见「运行记录（Trace）」），后续补充失败率统计与 Trace 持久化
+- **测试体系**：Agent Trace 链路已有 pytest 用例，后续把真实链路验证整理成可重复运行的集成测试，并补齐其余模块的用例
 - **检索优化**：相似度阈值、混合检索（关键词 + 向量）、重排序

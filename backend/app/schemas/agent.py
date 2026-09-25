@@ -71,6 +71,27 @@ class AgentToolCall(BaseModel):
     )
 
 
+class AgentLLMCall(BaseModel):
+    """一次 LLM 调用。
+
+    它和 AgentToolCall 一起构成「这次回答是怎么来的」的完整链条：
+    哪几轮问了模型、每轮等了多久，中间又查了什么。
+    """
+
+    model: str = Field(
+        description="本次调用使用的模型名", examples=["deepseek-chat"]
+    )
+    duration_ms: float = Field(
+        description="本次调用耗时（毫秒），含网络等待", examples=[1180.25]
+    )
+    success: bool = Field(description="本次调用是否成功")
+    # 失败原因只用一句话说明（异常类型 + 消息），不含堆栈 ——
+    # 堆栈里的本机路径这类内部信息不该顺着接口出去。
+    error: str | None = Field(
+        default=None, description="失败原因；成功时为 null", examples=[None]
+    )
+
+
 class AgentResponse(BaseModel):
     """POST /api/knowledge-bases/{id}/agent 的响应体。"""
 
@@ -81,4 +102,25 @@ class AgentResponse(BaseModel):
     tool_calls: list[AgentToolCall] = Field(
         default_factory=list,
         description="本次回答过程中实际执行过的工具调用；模型直接作答时为空列表",
+    )
+
+    # ---- 运行记录（Trace）----
+    # 这几个字段回答的是「这一轮跑得怎么样」：慢在哪、卡在哪、是不是在打转。
+    # 刻意只挑这四项暴露：更细的（每次都调了哪个工具的第几个参数、
+    # 被拒绝的调用等）留在服务端，接口不需要，也不该把内部结构整个摊出去。
+    trace_id: str = Field(
+        description="本次运行的 Trace ID，可在服务端日志里按它捞到同一轮的完整记录",
+        examples=["3f2a1c8e-9b4d-4f0a-8f1e-2b6c7d5a9e10"],
+    )
+    iterations: int = Field(
+        description="「调模型 → 执行工具」循环了几轮；等于 5 说明模型在打转、已被强制收敛",
+        examples=[2],
+    )
+    llm_calls: list[AgentLLMCall] = Field(
+        default_factory=list,
+        description="每一次 LLM 调用的耗时与成败，按发生顺序排列",
+    )
+    total_duration_ms: float = Field(
+        description="整个 Agent Run 的总耗时（毫秒），从收到问题到拿到回答",
+        examples=[1820.4],
     )

@@ -124,20 +124,28 @@ def strip_prefix(model_facing_name: str) -> str:
     return model_facing_name.removeprefix(MCP_TOOL_PREFIX)
 
 
-async def call_tool(client: Client, name: str, arguments: dict[str, Any]) -> str:
-    """调用一个 MCP 工具，返回要交给模型的文本。
+async def call_tool(
+    client: Client, name: str, arguments: dict[str, Any]
+) -> tuple[str, str | None]:
+    """调用一个 MCP 工具，返回 (要交给模型的文本, 失败原因)。
 
     **这个函数不抛异常**：任何失败都会变成一段 JSON 错误说明返回给模型。
     理由和内部工具一致 —— 让模型看到「这次没成功」，它还有机会换个方式重试
     或基于已有信息作答；而让异常穿出去，整个 Agent 请求就废了。
+
+    失败原因单独作为第二个返回值给出，而不是让调用方去解析那段 JSON：
+    错误文本是【给模型看的】，格式服务于模型的可读性；上层（Agent 的 Trace）
+    要知道的是「这次成没成功」，两件事不该挤在同一个字符串里。
+    反解析还有个实际风险 —— Server 正常返回的内容里也可能出现 error 字段，
+    那样会把一次成功的调用误判成失败。
 
     参数：
         name:      MCP Server 里的【原始】工具名（不带前缀）。
         arguments: 工具参数。
 
     返回：
-        模型可读的文本。成功时是 Server 返回的内容，失败时是形如
-        {"error": "..."} 的 JSON。
+        (模型可读的文本, 失败原因)。成功时第二个元素是 None；
+        失败时是形如 {"error": "..."} 的 JSON 加一句简短的原因说明。
     """
     try:
         result = await client.call_tool(
@@ -151,14 +159,17 @@ async def call_tool(client: Client, name: str, arguments: dict[str, Any]) -> str
         # 详细堆栈只进日志 —— 它可能带着本机路径、解释器位置这些内部信息，
         # 而这段文本是要进模型上下文、有可能被复述给用户的。
         logger.exception("调用 MCP 工具失败：%s", name)
-        return json.dumps({"error": "mcp tool call failed"}, ensure_ascii=False)
+        return json.dumps({"error": "mcp tool call failed"}, ensure_ascii=False), "mcp tool call failed"
 
     if result.is_error:
         # Server 自己报了错。刻意【原样透传 Server 的错误文本】之前的那层判断：
         # MCP 的错误信息虽然通常不含堆栈，但那是 Server 的实现细节，
         # 我们不为它背书。统一换成我们自己的措辞，细节留在日志里。
         logger.warning("MCP 工具返回错误：%s", name)
-        return json.dumps({"error": "mcp tool execution failed"}, ensure_ascii=False)
+        return (
+            json.dumps({"error": "mcp tool execution failed"}, ensure_ascii=False),
+            "mcp tool execution failed",
+        )
 
     # 提取文本内容。MCP 的内容块可以是文本、图片、资源引用等多种类型，
     # 这里只取文本 —— 本项目的工具都是返回 JSON 文本的，
@@ -170,6 +181,9 @@ async def call_tool(client: Client, name: str, arguments: dict[str, Any]) -> str
     ]
     if not texts:
         logger.warning("MCP 工具没有返回文本内容：%s", name)
-        return json.dumps({"error": "mcp tool returned no text content"}, ensure_ascii=False)
+        return (
+            json.dumps({"error": "mcp tool returned no text content"}, ensure_ascii=False),
+            "mcp tool returned no text content",
+        )
 
-    return "\n".join(texts)
+    return "\n".join(texts), None

@@ -59,6 +59,19 @@ def get_llm_client() -> AsyncOpenAI:
     return _llm_client
 
 
+def model_name() -> str:
+    """当前使用的模型名。
+
+    给 Trace 用：调用方（agent.py）需要把「这一轮对话用的是哪个模型」记进
+    运行记录，但模型名是 LLM 层的配置 —— 让上层去读 settings.DEEPSEEK_MODEL
+    等于把「用哪个模型」这件事的责任挪到了上层，将来本模块换成别的供应商，
+    就得去改所有 import settings 的地方。从这里问一句最省事。
+
+    只暴露名字，不暴露 Key：模型名不是密钥，写进 Trace 和日志都没有问题。
+    """
+    return settings.DEEPSEEK_MODEL
+
+
 async def chat(
     messages: list[ChatCompletionMessageParam],
     temperature: float = 0.7,
