@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import ToolCallList from './ToolCallList.vue'
+import TracePanel from './TracePanel.vue'
 import type { ChatMessage } from '../types'
 
 const props = defineProps<{
@@ -38,6 +39,15 @@ const timeText = computed(() =>
       <ToolCallList
         v-if="!isUser && message.toolCalls && message.toolCalls.length > 0"
         :tool-calls="message.toolCalls"
+      />
+
+      <!-- 运行记录同样只挂在 assistant 消息上，默认收起。
+           工具调用次数直接数 tool_calls 的长度，与上面那份列表同源，
+           不会出现「列表 2 条、记录里写 3 次」这种对不上的情况。 -->
+      <TracePanel
+        v-if="!isUser && message.trace"
+        :trace="message.trace"
+        :tool-call-count="message.toolCalls?.length ?? 0"
       />
     </div>
   </article>

@@ -3,12 +3,16 @@ import { nextTick, ref, watch } from 'vue'
 
 import ChatInput from './ChatInput.vue'
 import ChatMessage from './ChatMessage.vue'
-import type { ChatMessage as ChatMessageType, KnowledgeBase } from '../types'
+import type { ChatMessage as ChatMessageType, ChatSession, KnowledgeBase } from '../types'
 
 const props = defineProps<{
   /** 当前选中的知识库。为 null 表示还没选。 */
   knowledgeBase: KnowledgeBase | null
   messages: ChatMessageType[]
+  /** 当前知识库的会话列表（新建的在前）。 */
+  sessions: ChatSession[]
+  /** 当前选中的会话 localId。 */
+  activeSessionId: string | null
   /** Agent 正在回答。用来禁用输入并显示等待提示。 */
   thinking: boolean
   /** 上一次提问失败的提示，成功或重发时应被清空。 */
@@ -17,32 +21,77 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
+  (e: 'new-session'): void
+  (e: 'select-session', localId: string): void
 }>()
 
 const scrollArea = ref<HTMLElement | null>(null)
 
 /**
- * 新消息或「正在思考」出现时滚到底部。
+ * 新消息、「正在思考」出现、或切换会话时滚到底部。
+ *
+ * 监听的是 messages 这个【数组本身】而不是它的长度：切换会话时两份消息数量
+ * 可能正好相同，只看长度的话不会触发，界面就会停在上一个会话的滚动位置上。
+ * 数组在每次变化时都是被整体替换的（HomeView 里用展开语法生成新数组），
+ * 所以引用变化 = 「有新内容」，这个信号比长度更准。
  *
  * 放在 nextTick 里，是因为要等 Vue 把新内容渲染进 DOM 之后才能算出新的高度；
  * 否则滚动位置会停在上一条消息那里，看起来像「消息没出来」。
  */
 watch(
-  () => [props.messages.length, props.thinking],
+  () => [props.messages, props.thinking],
   async () => {
     await nextTick()
     scrollArea.value?.scrollTo({ top: scrollArea.value.scrollHeight, behavior: 'smooth' })
   },
 )
+
+function handleSelectSession(event: Event): void {
+  const select = event.target as HTMLSelectElement
+  emit('select-session', select.value)
+}
 </script>
 
 <template>
   <section class="chat">
     <header class="chat__header">
-      <h2 class="chat__title">{{ knowledgeBase ? knowledgeBase.name : '未选择知识库' }}</h2>
-      <p v-if="knowledgeBase" class="chat__subtitle">
-        {{ knowledgeBase.description || '暂无描述' }} · {{ knowledgeBase.document_count }} 篇文档
-      </p>
+      <div class="chat__heading">
+        <h2 class="chat__title">{{ knowledgeBase ? knowledgeBase.name : '未选择知识库' }}</h2>
+        <p v-if="knowledgeBase" class="chat__subtitle">
+          {{ knowledgeBase.description || '暂无描述' }} · {{ knowledgeBase.document_count }} 篇文档
+        </p>
+      </div>
+
+      <!-- 会话切换。
+           后端只有「新建会话」（不传 conversation_id）和「延续会话」（传上一次的
+           ID）两种入口，没有会话列表接口，所以这份下拉框的内容由前端自己维护
+           （见 storage.ts）。「新会话」不会立刻请求后端 —— 后端要等第一句话
+           才创建记录，那时它才会返回真正的会话 ID。
+
+           「正在思考」期间禁用切换：请求发出后输入框会禁用并显示等待提示，
+           此时如果切到另一个会话，那个会话会跟着显示「正在思考」，
+           而它其实什么都没在做 —— 看起来像卡死了。一次只跑一轮，跑完再切。 -->
+      <div v-if="knowledgeBase" class="sessions">
+        <select
+          class="sessions__select"
+          aria-label="选择会话"
+          :disabled="thinking"
+          :value="activeSessionId ?? ''"
+          @change="handleSelectSession"
+        >
+          <option v-for="session in sessions" :key="session.localId" :value="session.localId">
+            {{ session.title }}
+          </option>
+        </select>
+        <button
+          class="sessions__new"
+          type="button"
+          :disabled="thinking"
+          @click="emit('new-session')"
+        >
+          + 新会话
+        </button>
+      </div>
     </header>
 
     <div ref="scrollArea" class="chat__body">
@@ -54,8 +103,10 @@ watch(
       </div>
 
       <div v-else-if="messages.length === 0 && !thinking" class="chat__placeholder">
-        <p class="chat__placeholder-main">「{{ knowledgeBase.name }}」还没有对话</p>
-        <p class="chat__placeholder-sub">在下方输入问题，开始第一轮对话</p>
+        <p class="chat__placeholder-main">「{{ knowledgeBase.name }}」的当前会话还没有消息</p>
+        <p class="chat__placeholder-sub">
+          在下方输入问题开始对话，或点右上角「+ 新会话」另起一段
+        </p>
       </div>
 
       <div v-else class="chat__messages">
@@ -94,10 +145,19 @@ watch(
 }
 
 .chat__header {
+  display: flex;
   flex-shrink: 0;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
   padding: 16px 24px;
   background-color: #fff;
   border-bottom: 1px solid var(--color-border);
+}
+
+.chat__heading {
+  /* 允许标题区收缩：不设的话长名字会把右侧的会话选择器顶出去 */
+  min-width: 0;
 }
 
 .chat__title {
@@ -157,6 +217,47 @@ watch(
   color: #b42318;
   background-color: #fef3f2;
   border-top: 1px solid #fecdca;
+  overflow-wrap: anywhere;
+}
+
+.sessions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  align-items: center;
+}
+
+.sessions__select {
+  max-width: 220px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background-color: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.sessions__select:disabled,
+.sessions__new:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sessions__new {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  background-color: var(--color-surface-hover);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.sessions__new:hover {
+  background-color: #e5e7eb;
 }
 
 .thinking {

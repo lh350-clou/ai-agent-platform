@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import type { AgentToolCall } from '../types'
 
+/**
+ * 本次回答执行过的工具调用。
+ *
+ * 这里【不显示】每次调用的成功/失败和耗时：后端确实记录了它们，但只记在
+ * 服务端的 Trace 里，没有暴露到 AgentToolCall 这个结构上（见
+ * backend/app/schemas/agent.py）。所以界面上只呈现后端真正给出来的东西 ——
+ * 工具名和参数。想知道调用的成败，看同一条回答下的「运行记录」里模型调用的状态，
+ * 或者拿 trace_id 去服务端日志里查。
+ */
 defineProps<{
   toolCalls: AgentToolCall[]
 }>()

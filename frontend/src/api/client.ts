@@ -76,11 +76,18 @@ function extractDetail(body: unknown): string | null {
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
 
+  // 请求体是 FormData 时【不能】手动设 Content-Type。
+  // multipart 的 Content-Type 里必须带一段随机 boundary（分隔各字段的标记），
+  // 那个值只有浏览器在发送时才知道；手写成 "multipart/form-data" 会丢掉 boundary，
+  // 后端解析不出任何字段，只会得到「缺少 file / knowledge_base_id」的 422。
+  // 不设这个头，浏览器会自动补上带 boundary 的正确值。
+  const isFormData = init?.body instanceof FormData
+
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
       headers: {
-        'Content-Type': 'application/json',
+        ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
         ...(init?.headers ?? {}),
       },
     })

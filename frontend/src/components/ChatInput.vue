@@ -12,10 +12,19 @@ const props = withDefaults(
   defineProps<{
     disabled?: boolean
     placeholder?: string
+    /**
+     * 最多能输入多少字符。
+     *
+     * 默认 2000，与后端对 question 的上限一致（app/schemas/agent.py 和
+     * app/schemas/qa.py 里的 MAX_QUESTION_LENGTH）。超长的问题会被后端以 422
+     * 直接拒掉，而那要等一次完整的网络往返才看得到 —— 不如在输入框这一层就挡住。
+     */
+    maxlength?: number
   }>(),
   {
     disabled: false,
     placeholder: '输入问题，Enter 发送，Shift + Enter 换行',
+    maxlength: 2000,
   },
 )
 
@@ -53,6 +62,7 @@ function handleKeydown(event: KeyboardEvent): void {
       class="composer__input"
       :placeholder="placeholder"
       :disabled="disabled"
+      :maxlength="maxlength"
       rows="1"
       @keydown="handleKeydown"
     ></textarea>
