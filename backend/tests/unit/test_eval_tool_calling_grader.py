@@ -11,6 +11,8 @@
 看起来像「只有参数有点小问题」。
 """
 
+import pytest
+
 from app.services.agent import ToolCallRecord
 from app.services.trace import ToolCallTrace, Trace
 from tests.evals.graders.tool_calling import grade
@@ -19,6 +21,12 @@ from tests.evals.schemas import (
     ToolCallingCase,
     ToolExpectation,
 )
+
+# 两条正交的标记：unit 说明它不依赖外部服务，regression 说明它属于
+# 「守住已有能力」的那批（见 tests/regression/README.md）。
+# grader 判定得对不对靠本文件守；评测链路本身还跑不跑得通，
+# 由 tests/regression/test_eval_pipeline.py 跑一次真入口来守。
+pytestmark = [pytest.mark.unit, pytest.mark.regression]
 
 
 def _make_case(expected_tools: list[str]) -> ToolCallingCase:

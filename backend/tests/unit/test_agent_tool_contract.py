@@ -33,6 +33,10 @@ from app.services.agent import (
     _normalize_tool_arguments,
 )
 
+# 两条正交的标记：unit 说明它不依赖外部服务，regression 说明它属于
+# 「守住已有能力」的那批（见 tests/regression/README.md）。
+pytestmark = [pytest.mark.unit, pytest.mark.regression]
+
 
 def _validated(raw: dict) -> SearchToolArgs:
     """走一遍生产代码的完整参数处理路径：先收敛，再校验。

@@ -24,6 +24,10 @@ from app.services import agent
 from app.services.agent import MAX_TOOL_ITERATIONS, SEARCH_TOOL_NAME, run_agent
 from app.services.trace import LLMCallTrace, ToolCallTrace, Trace, TraceContext
 
+# 两条正交的标记：unit 说明它不依赖外部服务，regression 说明它属于
+# 「守住已有能力」的那批（见 tests/regression/README.md）。
+pytestmark = [pytest.mark.unit, pytest.mark.regression]
+
 KB_ID = uuid4()
 
 # 假的 LLM 调用要真的等一会儿，才能验出「耗时是真记的」而不是恒为 0。

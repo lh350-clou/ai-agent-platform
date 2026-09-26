@@ -10,6 +10,10 @@ import pytest
 
 from app.services.trace import LLMCallTrace, ToolCallTrace, Trace, TraceContext
 
+# 两条正交的标记：unit 说明它不依赖外部服务，regression 说明它属于
+# 「守住已有能力」的那批（见 tests/regression/README.md）。
+pytestmark = [pytest.mark.unit, pytest.mark.regression]
+
 # 让异步上下文管理器里真的过掉一段时间，再断言记到的时长对得上。
 # 取 20ms 是因为 Windows 的定时器精度只有毫秒级偏粗，睡 10ms 实际可能到 15ms 以上，
 # 而 asyncio.sleep 【不会提前返回】，所以「>= 20」是个稳的下界，

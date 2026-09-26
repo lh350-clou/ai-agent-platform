@@ -26,6 +26,7 @@
 | **多轮对话与持久化** | `conversation_id` 串联上下文，消息落 PostgreSQL，刷新后数据仍在 |
 | **前后端完整交互** | Vue 3 + TypeScript 界面，通过 REST API 与后端通信 |
 | **三层 Evaluation** | Tool Calling / RAG / Final Answer 三层可重复评测，确定性检查优先 + LLM 判官兜底 |
+| **一键回归（Regression V1）** | `pytest -m regression` 一条命令跑完 7 项核心能力，真实服务 + 离线用例统一入口 |
 | **Docker Compose 一键部署** | 7 个服务编排，含健康检查、迁移自动执行、数据卷持久化 |
 
 ---
@@ -499,6 +500,10 @@ npm run dev          # http://127.0.0.1:5173
 │   ├── alembic/versions/         # 数据库迁移
 │   ├── tests/
 │   │   ├── unit/                 # pytest 单元测试（不联网，任何机器可跑）
+│   │   ├── regression/           # Regression V1：核心能力一键回归
+│   │   │   ├── availability.py   #   外部服务探活（跳过还是失败，只在这一处判断）
+│   │   │   ├── conftest.py       #   临时知识库 fixture 与清理
+│   │   │   └── test_*.py         #   按能力分文件：health / agent / rag / mcp / postgres / eval
 │   │   └── evals/                # Evaluation V1：三层评测
 │   │       ├── datasets/         #   用例（jsonl，人工标注）
 │   │       ├── graders/          #   判定逻辑（纯函数 + LLM 判官）
@@ -529,14 +534,20 @@ npm run dev          # http://127.0.0.1:5173
 
 ### 自动化测试
 
-仓库中有可运行的 pytest 测试套件：用例位于 `backend/tests/unit/`，配置见 `backend/pytest.ini`，
-依赖 `pytest` / `pytest-asyncio` 已写入 `backend/requirements.txt`。
+用例位于 `backend/tests/`，配置见 `backend/pytest.ini`，依赖 `pytest` / `pytest-asyncio` / `httpx`
+已写入 `backend/requirements.txt`。
+
+当前共 **52 条用例**。标记有两条互相独立的轴（定义见 `pytest.ini`）：
+`unit` / `integration` 说明**怎么跑**（要不要外部服务），`regression` 说明**为什么跑**（守住已有能力）。
 
 ```bash
-cd backend && pytest
+cd backend
+pytest                            # 全部
+pytest -m regression              # 回归集（当前与「全部」相同，见 Regression V1）
+pytest -m "regression and unit"   # 只跑不依赖外部服务的那部分，任何机器都能跑
 ```
 
-当前共 **36 个单元测试**，集中在 Agent 的 Trace 链路、工具契约与评测判定逻辑上。它们把外部依赖（LLM、MCP、embedding、向量库）
+其中 **36 条单元测试**位于 `tests/unit/`，集中在 Agent 的 Trace 链路、工具契约与评测判定逻辑上。它们把外部依赖（LLM、MCP、embedding、向量库）
 全部替换为假实现 —— 不联网、不连库、不起子进程，因此在任何机器上都能跑：
 
 | 文件 | 覆盖内容 |
@@ -547,6 +558,43 @@ cd backend && pytest
 | `tests/unit/test_eval_tool_calling_grader.py` | 评测 grader 的 `tool_selection` F1 计算：选对为 1、**全选错必须为 0**（这里出过一个把「工具全选错」记成满分的 bug）、双方都为空为 1、部分命中落在 (0,1)、`allow_extra_tools` 只放过多调不放过漏调 |
 
 > `top_k` 的边界为什么是单测而不是评测用例：顺着 Agent 的执行路径走，模型给出 `top_k=1000` 时，**有**收敛逻辑就改成 5 并通过校验，**没有**收敛逻辑就被范围校验整次拒绝、`arguments` 保持 `{}`。两种情况下观测到的 `top_k` 都不超过 5，所以在评测数据集里写「`top_k <= 5`」是一条**不可能失败**的断言。真正能区分「有收敛」和「没收敛」的只有直接调函数的单测。
+
+### Regression V1（一键回归）
+
+```bash
+cd backend
+pytest -m regression
+```
+
+一条命令回答一个问题：**这次改动有没有把已经能用的东西弄坏。** 覆盖 7 项核心能力，其中 13 条用例打在真实服务上：
+
+| 覆盖 | 守什么 |
+| --- | --- |
+| FastAPI `/health` | 字段契约；**数据库连不上时仍返回 200**（否则容器会被反复重启，而根因看起来完全在别处） |
+| Agent Tool Loop | 真模型 + 真 Milvus：模型请求检索 → 执行 → 结果回传 → 作答，整条链路走通 |
+| Agent Trace | 轮数、每次模型与工具调用的耗时、失败标记、`trace_id` 都如实记录（离线部分在 `tests/unit/`） |
+| RAG 检索 | 入库即可检索、**跨知识库查不到**、按知识库删除立即生效 |
+| MCP Tool | 真起 Server 子进程：工具发现、参数 schema、非法参数返回**可读错误**而不是协议失败 |
+| PostgreSQL 持久化 | ORM 写读回滚、模型定义与数据库 schema 一致（**不写生产数据、不建表**） |
+| Evaluation V1 | 真入口跑通并落盘报告；grader 判定由单元测试守，**不在回归里复制一份** |
+
+几条设计取舍：
+
+- **回归不是评测。** 回归只回答「还在不在」，评测回答「变好还是变差」。所以回归**不断言检索质量**——
+  那种断言会随模型和语料波动，而一个会随机变红的回归套件很快就会没人看。
+- **评测的 grader 一行都没复制进来。** 抄一份等于有两份「什么算通过」的定义，改了一处没改另一处时
+  两边会给出矛盾结论，而没人知道该信哪个。回归只用「跑一次真入口，看退出码和报告」来验链路还通不通。
+- **服务不可用时跳过，但跳过是看得见的。** 跳过原因始终打印（`pytest.ini` 里的 `-rs`），
+  并可用 `REGRESSION_REQUIRE_SERVICES=1` 把跳过升级成失败 ——「服务没起」在 CI 上本来就该修，
+  不该被一个安静的 skip 盖过去。
+- **不碰生产数据。** Milvus 用随机知识库 ID 并在用例结束时（含失败）清空；PostgreSQL 只做
+  「写一行 → 读回来 → 回滚」；临时语料与评测报告都写在 pytest 的 `tmp_path` 里。
+  跑完可自查：Milvus 的 `knowledge_base_id` 集合与 PostgreSQL 各表行数都和跑之前一致。
+- **复用而不是复制。** 检索、入库、Agent 循环、MCP 客户端调的都是生产函数；
+  已有的单元测试只加标记、不重写。
+
+完整说明（与单元/集成/评测的分工、数据安全、两个已知的坑）见
+[`backend/tests/regression/README.md`](backend/tests/regression/README.md)。
 
 ### Evaluation（三层评测）
 
@@ -578,11 +626,9 @@ python -m tests.evals.runner --layer final_answer --no-judge --limit 10
 
 ### 真实链路验证
 
-以下验证跑在真实的 DeepSeek / Milvus / MCP Server 上（这部分目前仍是临时脚本，尚未纳入版本库）。
-
-### 真实链路验证
-
-以下验证跑在真实的 DeepSeek / Milvus / MCP Server 上（这部分目前仍是临时脚本，尚未纳入版本库）。
+下表是开发过程中在真实 DeepSeek / Milvus / MCP Server 上做过的验证。其中一部分已经整理成
+可重复运行的用例（Agent 循环与 Trace、MCP 工具发现与调用、RAG 检索与隔离、PostgreSQL 读写与 schema
+—— 都在 Regression V1 里），表中其余各项仍是人工验证记录：
 
 | 类别 | 内容 |
 | --- | --- |
@@ -600,9 +646,11 @@ python -m tests.evals.runner --layer final_answer --no-judge --limit 10
 
 **尚未覆盖**
 
-- 单元用例目前只覆盖 Agent Trace 链路与评测 grader；文档解析与切分、向量入库、知识库级联删除、MCP 会话生命周期等模块仍依赖人工验证。
-- 真实链路验证需要外部服务与 API Key，尚未整理成可重复运行的集成测试（Evaluation 那三层已经纳入了版本库，但它们需要真实服务，不随 `pytest` 一起跑）。
+- 单元用例目前只覆盖 Agent Trace 链路、工具契约与评测 grader；文档解析与切分、知识库级联删除、接口的错误路径（参数校验边界、越权访问）等仍依赖人工验证。
+- 需要外部服务与 API Key 的验证已有一部分纳入版本库：Regression V1 的 13 条集成用例与 Evaluation 三层都能重复运行，
+  服务不可用时**跳过并说明原因**（而不是静默通过）。剩余的人工项见上表。
 - Evaluation 尚未覆盖：Reliability（同一数据集多次运行的方差）、回归 Dashboard、`/ask` 路径的最终答案评测。
+  Regression V1 回答的是「有没有被弄坏」，不回答「波动有多大」—— 后者需要连跑多次，是独立的一件事。
 
 ---
 
@@ -657,5 +705,5 @@ Vue 3 + TypeScript 界面，包含知识库管理、对话、工具调用展示�
 - **对话管理**：会话列表、重命名、单独删除的 API 与界面
 - **更多 MCP Tools**：当前 MCP Client / Server 架构支持扩展多个工具，后续可继续增加时间查询之外的工具。
 - **Agent 可观测性**：工具调用链路追踪与耗时统计已落地（见「运行记录（Trace）」），后续补充失败率统计与 Trace 持久化
-- **测试体系**：Agent Trace 链路与评测 grader 已有 pytest 用例，三层 Evaluation 已可重复运行；后续把其余真实链路验证也整理成可重复运行的集成测试，并补齐其余模块的用例
+- **测试体系**：一键回归入口（`pytest -m regression`）已覆盖 7 项核心能力，三层 Evaluation 可重复运行；后续把上表剩余的人工验证项（接口错误路径、知识库级联删除、Docker E2E）也整理成用例，并补齐解析/切分模块的单测
 - **检索优化**：相似度阈值、混合检索（关键词 + 向量）、重排序

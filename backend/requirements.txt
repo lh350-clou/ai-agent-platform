@@ -85,3 +85,12 @@ pytest>=8.0
 # pytest 的异步支持：run_agent、Trace 的异步上下文管理器都是协程，
 # 没有它就只能把每个用例包在 asyncio.run() 里，噪音比依赖本身还大。
 pytest-asyncio>=0.24
+
+# ASGI 测试客户端：回归用例里要打 FastAPI 的 /health，而它是 ASGI 应用，
+# 不起 uvicorn、不占端口的话就得有个按 ASGI 协议直接调它的客户端。
+#
+# 这一条其实【不新增任何安装量】：openai SDK 已经依赖 httpx，环境里本来就有。
+# 之所以显式声明，是因为测试代码直接 import 了它 ——
+# 依赖一个「别人的传递依赖」意味着哪天 openai 换掉底层 HTTP 库，
+# 测试会以 ImportError 的形式突然挂掉，而原因看起来和测试毫无关系。
+httpx>=0.27
